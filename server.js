@@ -825,8 +825,8 @@ function workOrderSpecs(context,type,contractorAssignment=null){
         const menuName=String(menuItem?.name||menuItem?.item_name||'').trim();
         // Normalize Arabic spelling variants before classifying water-bottle menu items.
         const normalizedMenuName=menuName.replace(/[\u064B-\u065F\u0670ـ]/g,'').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/\s+/g,' ').trim().toLowerCase();
-        const hasWater=/ماء|مياه|مياة|مايه|water/.test(normalizedMenuName);
-        const hasBottle=/ازازه|ازازه|زجاجه|زجاج|عبوه|قاروره|قنينه|bottle/.test(normalizedMenuName);
+        const hasWater=/ماء|مياه|مياة|مايه|ماية|water/.test(normalizedMenuName);
+        const hasBottle=/ازايز|ازاز|ازازه|زجاجه|زجاج|عبوه|قاروره|قنينه|bottle/.test(normalizedMenuName);
         const isWaterBottle=hasWater&&hasBottle;
         const configuredHallTableCount=Number(hallTableCounts[String(booking.hall_id)]||hallTableCounts[Number(booking.hall_id)]||0);
         const tableCount=configuredHallTableCount||Number(selected.table_count||selected.tables_count||selected.number_of_tables||booking.table_count||booking.tables_count||booking.number_of_tables||0);
@@ -1087,7 +1087,7 @@ app.post('/api/:resource', auth, requireDb, async (req, res, next) => {
     if (table === 'users') {
       if (!body.password || String(body.password).length < 10) return res.status(400).json({ error: 'كلمة المرور يجب أن تكون 10 أحرف على الأقل' });
       body.password_hash = await bcrypt.hash(String(body.password), 12); delete body.password;
-      body.permissions = JSON.stringify(parsePermissions(body.permissions)); body.active = body.active === false ? false : true;
+      body.permissions = JSON.stringify(parsePermissions(body.permissions)); body.active = (body.active === false || body.active === 0 || body.active === '0') ? 0 : 1;
     }
     const { data, error } = await supabase.from(table).insert(body).select('*').single();
     if (error) throw error;
@@ -1102,7 +1102,7 @@ app.put('/api/:resource/:id', auth, requireDb, async (req, res, next) => {
     const body = { ...(req.body || {}) }; delete body.id; delete body.password_hash;
     if (table === 'users') {
       if (body.password) { if (String(body.password).length < 10) return res.status(400).json({ error: 'كلمة المرور يجب أن تكون 10 أحرف على الأقل' }); body.password_hash = await bcrypt.hash(String(body.password), 12); }
-      delete body.password; if (body.permissions !== undefined) body.permissions = JSON.stringify(parsePermissions(body.permissions));
+      delete body.password; if (body.permissions !== undefined) body.permissions = JSON.stringify(parsePermissions(body.permissions)); if (body.active !== undefined) body.active = (body.active === false || body.active === 0 || body.active === '0') ? 0 : 1;
     }
     const { data, error } = await supabase.from(table).update(body).eq('id', Number(req.params.id)).select('*').maybeSingle();
     if (error) throw error; if (!data) return res.status(404).json({ error: 'السجل غير موجود' }); if(table==='users'){const {password_hash,...safe}=data; return res.json({...safe,...publicUser(safe)});} res.json(data);

@@ -71,7 +71,7 @@ tables.forEach(tableName => {
   app.get(`/api/${tableName}`, auth, (req, res) => fetchSafeTable(res, tableName));
 });
 
-// معالج عام لأي مسار API آخر تطلبه الواجهة لتجنب انهيار التطبيق نهائياً وإرجاع مصفوفة فارغة
+// معالج عام شامل لأي مسار API آخر قد تطلبه الواجهة لضمان إرجاع مصفوفة فارغة ودعم الدوال البرمجية (.map, .filter, .reduce)
 app.all('/api/*', auth, (req, res) => {
   return res.json([]);
 });

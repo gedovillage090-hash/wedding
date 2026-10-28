@@ -97,7 +97,8 @@ async function getRows(table, opts = {}) {
   let q = supabase.from(table).select('*');
   if (opts.id) q = q.eq('id', opts.id);
   if (opts.limit) q = q.limit(opts.limit);
-  if (opts.order !== false) q = q.order('id', { ascending: false });
+  // buffet_package_items is a junction table with package_id/item_id/quantity and intentionally has no id column.
+  if (opts.order !== false && table !== 'buffet_package_items') q = q.order('id', { ascending: false });
   const { data, error } = await q;
   if (error) throw error;
   return data || [];

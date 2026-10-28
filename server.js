@@ -103,22 +103,8 @@ async function getRows(table, opts = {}) {
   return data || [];
 }
 function handleDbError(res, error) {
-  const message = String(error?.message || error || 'Unknown database error');
-  console.error('Database request failed:', {
-    message,
-    code: error?.code || null,
-    details: error?.details || null,
-    hint: error?.hint || null
-  });
-  // Return a sanitized diagnostic message so schema mismatches can be fixed precisely.
-  // Do not expose credentials or request headers.
-  return res.status(400).json({
-    error: 'تعذر تنفيذ العملية على قاعدة البيانات.',
-    database_error: message,
-    code: error?.code || null,
-    details: error?.details || null,
-    hint: error?.hint || null
-  });
+  console.error('Database request failed:', error?.message || error);
+  return res.status(400).json({ error: 'تعذر تنفيذ العملية على قاعدة البيانات. راجع أسماء الأعمدة وصلاحيات الاتصال.' });
 }
 
 app.get('/api/health', async (req, res) => { let database='not_configured'; if(dbReady()){try{const {error}=await supabase.from('app_settings').select('key').limit(1);database=error?'error':'connected';}catch{database='error';}} res.status(database==='error'?503:200).json({ok:database==='connected',database,databaseConfigured:dbReady(),timestamp:new Date().toISOString()}); });
@@ -760,7 +746,7 @@ const WORK_ORDER_TYPES={hall:{code:'HALL',title:'أمر تجهيز القاعة'
 const drinkPattern=/(مياه|مياة|ماء|زجاجة|كانز|كنز|سوفت|درينك|عصير|كولا|بيبسي|سفن|7\s*up|water|juice|soft.?drink|can)/i;
 async function workOrderContext(booking){
   const [customer,hall,pkg,bookingBuffets,bufferPackages,bufferItems,packageItems,bookingAddons,addons,operationalAddons,inventory,contractors,assignments]=await Promise.all([
-    one('customers',booking.customer_id),one('halls',booking.hall_id),one('hall_packages',booking.hall_package_id),rows('booking_buffets',{booking_id:Number(booking.id)}),getRows('buffet_packages'),getRows('buffet_items'),getRows('buffet_package_items'),rows('booking_addons',{booking_id:Number(booking.id)}),getRows('addons'),rows('booking_operational_addons',{booking_id:Number(booking.id)}),getRows('inventory_items'),getRows('contractors'),rows('booking_work_contractors',{booking_id:Number(booking.id)})
+    one('customers',booking.customer_id),one('halls',booking.hall_id),one('hall_packages',booking.hall_package_id),rows('booking_buffets',{booking_id:Number(booking.id)}),getRows('buffet_packages'),getRows('buffet_items'),getRows('buffet_package_items',{order:false}),rows('booking_addons',{booking_id:Number(booking.id)}),getRows('addons'),rows('booking_operational_addons',{booking_id:Number(booking.id)}),getRows('inventory_items'),getRows('contractors'),rows('booking_work_contractors',{booking_id:Number(booking.id)})
   ]);
   return {booking,customer:customer||{},hall:hall||{},pkg:pkg||{},bookingBuffets,bufferPackages,bufferItems,packageItems,bookingAddons,addons,operationalAddons,inventory,contractors,assignments};
 }
@@ -783,18 +769,9 @@ function workOrderSpecs(context,type,contractorAssignment=null){
       const buffet=bufferPackages.find(x=>Number(x.id)===Number(selected.buffet_package_id));
       const selectedItems=packageItems.filter(x=>Number(x.package_id)===Number(selected.buffet_package_id));
       for(const rel of selectedItems){
-        const menuItem=bufferItems.find(x=>Number(x.id)===Number(rel.item_id));
         const linked=inventory.filter(i=>Number(i.buffet_item_id)===Number(rel.item_id)&&String(i.source_type||'menu')!=='addon');
         const qty=Number(selected.guest_count||booking.guest_count||0)*Number(rel.quantity||0);
         for(const inv of linked)addInventory(inv,qty*Number(inv.units_per_buffet_unit||1),buffet?.name||'باكدج البوفيه');
-        // Drinks must appear on the store order even when no inventory mapping exists yet.
-        const menuName=String(menuItem?.name||menuItem?.item_name||'').trim();
-        if(!linked.length && menuName && drinkPattern.test(menuName) && qty>0){
-          const k='menu:'+Number(rel.item_id);
-          const old=totals.get(k)||{item_name:menuName,quantity:0,unit:String(menuItem?.unit||'وحدة'),details:buffet?.name||'باكدج البوفيه'};
-          old.quantity+=qty;
-          totals.set(k,old);
-        }
       }
     }
     for(const selected of bookingAddons){
@@ -802,13 +779,6 @@ function workOrderSpecs(context,type,contractorAssignment=null){
       const addon=addons.find(x=>Number(x.id)===Number(selected.addon_id));
       const qty=Number(selected.guest_count||booking.guest_count||0)*Number(selected.quantity_per_person||1);
       for(const inv of linked)addInventory(inv,qty*Number(inv.units_per_buffet_unit||1),addon?.name||'إضافة');
-      const addonName=String(addon?.name||'').trim();
-      if(!linked.length && addonName && drinkPattern.test(addonName) && qty>0){
-        const k='addon:'+Number(selected.addon_id);
-        const old=totals.get(k)||{item_name:addonName,quantity:0,unit:'وحدة',details:'إضافة بوفيه'};
-        old.quantity+=qty;
-        totals.set(k,old);
-      }
     }
     specs.push(...[...totals.values()].sort((a,b)=>a.item_name.localeCompare(b.item_name,'ar')));
   } else if(type==='contractor'&&contractorAssignment){

@@ -823,10 +823,12 @@ function workOrderSpecs(context,type,contractorAssignment=null){
         const menuItem=bufferItems.find(x=>Number(x.id)===Number(rel.item_id));
         const linked=inventory.filter(i=>Number(i.buffet_item_id)===Number(rel.item_id)&&String(i.source_type||'menu')!=='addon');
         const menuName=String(menuItem?.name||menuItem?.item_name||'').trim();
-        // Normalize Arabic spelling variants before classifying water-bottle menu items.
-        const normalizedMenuName=menuName.replace(/[\u064B-\u065F\u0670ـ]/g,'').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/\s+/g,' ').trim().toLowerCase();
-        const hasWater=/ماء|مياه|مياة|مايه|ماية|water/.test(normalizedMenuName);
-        const hasBottle=/ازايز|ازاز|ازازه|زجاجه|زجاج|عبوه|قاروره|قنينه|bottle/.test(normalizedMenuName);
+        // Classify water by both the buffet menu label and its linked inventory label.
+        // Some menus call the item only "مياه" while the linked stock item says "زجاجة مياه".
+        const normalizeArabicItemName=value=>String(value||'').replace(/[\u064B-\u065F\u0670ـ]/g,'').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/\s+/g,' ').trim().toLowerCase();
+        const waterNames=[menuName,...linked.map(i=>i.name||'')].map(normalizeArabicItemName);
+        const hasWater=waterNames.some(name=>/ماء|مياه|مياة|مايه|مايه|water/.test(name));
+        const hasBottle=waterNames.some(name=>/ازايز|ازاز|ازازه|زجاجه|زجاج|عبوه|قاروره|قنينه|bottle/.test(name));
         const isWaterBottle=hasWater&&hasBottle;
         const configuredHallTableCount=Number(hallTableCounts[String(booking.hall_id)]||hallTableCounts[Number(booking.hall_id)]||0);
         const tableCount=configuredHallTableCount||Number(selected.table_count||selected.tables_count||selected.number_of_tables||booking.table_count||booking.tables_count||booking.number_of_tables||0);

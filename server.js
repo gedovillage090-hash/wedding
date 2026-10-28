@@ -819,10 +819,14 @@ function workOrderSpecs(context,type,contractorAssignment=null){
       for(const rel of selectedItems){
         const menuItem=bufferItems.find(x=>Number(x.id)===Number(rel.item_id));
         const linked=inventory.filter(i=>Number(i.buffet_item_id)===Number(rel.item_id)&&String(i.source_type||'menu')!=='addon');
-        const qty=Number(selected.guest_count||booking.guest_count||0)*Number(rel.quantity||0);
+        const menuName=String(menuItem?.name||menuItem?.item_name||'').trim();
+        const isWaterBottle=/(ازازة|زجاجة|عبوة)\s*(مياه|مياة|ماء)|(?:مياه|مياة|ماء)\s*(?:ازازة|زجاجة|عبوة)/i.test(menuName);
+        const tableCount=Number(selected.table_count||selected.tables_count||booking.table_count||booking.tables_count||booking.number_of_tables||0);
+        // Water bottle quantities in buffet menus are per table, not per guest.
+        // If a table count is explicitly stored, use it; otherwise preserve the package's configured quantity as one table's requirement.
+        const qty=(isWaterBottle?(tableCount>0?tableCount:1):Number(selected.guest_count||booking.guest_count||0))*Number(rel.quantity||0);
         for(const inv of linked)addInventory(inv,qty*Number(inv.units_per_buffet_unit||1),buffet?.name||'باكدج البوفيه');
         // Drinks must appear on the store order even when no inventory mapping exists yet.
-        const menuName=String(menuItem?.name||menuItem?.item_name||'').trim();
         if(!linked.length && menuName && drinkPattern.test(menuName) && qty>0){
           const k='menu:'+Number(rel.item_id);
           const old=totals.get(k)||{item_name:menuName,quantity:0,unit:String(menuItem?.unit||'وحدة'),details:buffet?.name||'باكدج البوفيه'};
@@ -977,6 +981,72 @@ app.post('/api/contractor-payouts', auth, requireDb, async (req,res)=>{
     if(error){await supabase.from('cash_journal').delete().eq('id',journal.id);throw error;}
     res.status(201).json({...data,entry_no:journal.entry_no,payee:journal.payee});
   }catch(e){handleDbError(res,e)}
+});
+
+// Explicit buffet package APIs (junction table has composite key package_id + item_id).
+app.get('/api/buffetPackages/:id/items', auth, requireDb, async (req,res)=>{
+  try {
+    const packageId=Number(req.params.id);
+    if(!Number.isInteger(packageId)||packageId<1)return res.status(400).json({error:'رقم الباكدج غير صحيح'});
+    const {data,error}=await supabase.from('buffet_package_items').select('item_id,quantity').eq('package_id',packageId);
+    if(error)throw error;
+    const ids=(data||[]).map(x=>Number(x.item_id)).filter(Number.isFinite);
+    let items=[];
+    if(ids.length){const result=await supabase.from('buffet_items').select('*').in('id',ids);if(result.error)throw result.error;items=(result.data||[]).map(item=>({...item,quantity:Number((data||[]).find(x=>Number(x.item_id)===Number(item.id))?.quantity||1)}));}
+    return res.json(items);
+  }catch(e){return handleDbError(res,e)}
+});
+app.post('/api/buffetPackages', auth, requireDb, async (req,res)=>{
+  try {
+    const d=req.body||{}, name=String(d.name||'').trim(), price=Number(d.price_per_person);
+    if(!name||!Number.isFinite(price)||price<0)return res.status(400).json({error:'اسم الباكدج والسعر مطلوبان'});
+    const items=Array.isArray(d.items)?d.items:[];
+    if(!items.length)return res.status(400).json({error:'اختار صنفًا واحدًا على الأقل'});
+    const created=await supabase.from('buffet_packages').insert({name,price_per_person:price}).select('*').single();if(created.error)throw created.error;
+    const links=items.map(x=>({package_id:created.data.id,item_id:Number(x.id),quantity:Math.max(1,Math.trunc(Number(x.quantity)||1))}));
+    const linked=await supabase.from('buffet_package_items').insert(links);
+    if(linked.error){await supabase.from('buffet_packages').delete().eq('id',created.data.id);throw linked.error;}
+    return res.status(201).json(created.data);
+  }catch(e){return handleDbError(res,e)}
+});
+app.put('/api/buffetPackages/:id', auth, requireDb, async (req,res)=>{
+  try {
+    const id=Number(req.params.id), d=req.body||{};
+    if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'رقم الباكدج غير صحيح'});
+    const patch={};if(d.name!==undefined)patch.name=String(d.name).trim();if(d.price_per_person!==undefined){const price=Number(d.price_per_person);if(!Number.isFinite(price)||price<0)return res.status(400).json({error:'السعر غير صحيح'});patch.price_per_person=price;}
+    if(Object.keys(patch).length){const u=await supabase.from('buffet_packages').update(patch).eq('id',id).select('*').maybeSingle();if(u.error)throw u.error;if(!u.data)return res.status(404).json({error:'الباكدج غير موجود'});}
+    if(Array.isArray(d.items)){
+      const valid=d.items.map(x=>({package_id:id,item_id:Number(x.id),quantity:Number(x.quantity)}));
+      if(valid.some(x=>!Number.isInteger(x.item_id)||x.item_id<1||!Number.isInteger(x.quantity)||x.quantity<1))return res.status(400).json({error:'تحقق من أصناف الباكدج وكمياتها'});
+      const del=await supabase.from('buffet_package_items').delete().eq('package_id',id);if(del.error)throw del.error;
+      if(valid.length){const ins=await supabase.from('buffet_package_items').insert(valid);if(ins.error)throw ins.error;}
+    }
+    const result=await supabase.from('buffet_packages').select('*').eq('id',id).single();if(result.error)throw result.error;return res.json(result.data);
+  }catch(e){return handleDbError(res,e)}
+});
+// Admin-only JSON export of configured public tables. Restore is additive/upsert-only: it never deletes live rows.
+const BACKUP_TABLES=[...new Set(Object.values(TABLES).filter(x=>typeof x==='string')),'buffet_package_items'];
+app.get('/api/backup', auth, requireDb, requireAdmin, async (req,res)=>{
+  try {const tables={};for(const table of BACKUP_TABLES){const q=await supabase.from(table).select('*');if(q.error){if(q.error.code==='42P01')continue;throw q.error;}tables[table]=q.data||[];}
+    const backup={format:'nasim-supabase-backup',version:1,created_at:new Date().toISOString(),tables};
+    res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Content-Disposition',`attachment; filename="nasim-backup-${new Date().toISOString().slice(0,10)}.json"`);return res.send(JSON.stringify(backup));
+  }catch(e){return handleDbError(res,e)}
+});
+app.post('/api/backup/restore', auth, requireDb, requireAdmin, async (req,res)=>{
+  try {
+    const b=req.body;
+    if(!b||b.format!=='nasim-supabase-backup'||b.version!==1||!b.tables||typeof b.tables!=='object')return res.status(400).json({error:'ملف النسخة غير صالح أو غير مدعوم. استخدم ملف JSON صادرًا من نظام النسيم.'});
+    const allowed=new Set(BACKUP_TABLES), restored=[], skipped=[];
+    for(const [table,rowsData] of Object.entries(b.tables)){
+      if(!allowed.has(table)||!Array.isArray(rowsData)){skipped.push(table);continue;}if(!rowsData.length)continue;
+      // Never import password hashes/user records from a file; restore business data only.
+      if(table==='users'){skipped.push(table);continue;}
+      const rowsClean=rowsData.filter(r=>r&&typeof r==='object'&&!Array.isArray(r));if(!rowsClean.length)continue;
+      const opts=table==='buffet_package_items'?{onConflict:'package_id,item_id',ignoreDuplicates:true}:{onConflict:'id',ignoreDuplicates:true};
+      const result=await supabase.from(table).upsert(rowsClean,opts);if(result.error)throw Object.assign(new Error(`تعذر استعادة جدول ${table}: ${result.error.message}`),{code:result.error.code,details:result.error.details,hint:result.error.hint});restored.push({table,count:rowsClean.length});
+    }
+    return res.json({ok:true,message:'تم استيراد البيانات غير المتعارضة. لم تُحذف أي سجلات حالية، ولم تُستبدل حسابات المستخدمين.',restored,skipped,created_at:b.created_at||null});
+  }catch(e){return handleDbError(res,e)}
 });
 
 // Table CRUD for standard catalog and records. Unknown table names are never queried.

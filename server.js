@@ -449,12 +449,82 @@ app.get('/api/booking-archive', auth, requireDb, async (req,res) => {
   catch(e){ handleDbError(res,e); }
 });
 app.get('/api/availability', auth, requireDb, async (req,res) => {
-  try { const date=String(req.query.date||''); if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:'التاريخ غير صحيح'}); const all=await rows('bookings'); res.json(all.filter(b=>b.event_date===date && !['cancelled','postponed'].includes(String(b.status||'').toLowerCase()))); }
-  catch(e){ handleDbError(res,e); }
+  try {
+    const date = String(req.query.date || '');
+    const period = String(req.query.period || '').toLowerCase();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({error:'التاريخ غير صحيح'});
+
+    // The calendar UI expects { date, halls: [{ ..., bookings: [] }] }.
+    // Returning a flat bookings array made every date look available and
+    // caused the detail panel to say there were no halls.
+    const [hallRows, bookingRows, customerRows] = await Promise.all([
+      rows('halls'), rows('bookings'), rows('customers')
+    ]);
+    const customerById = new Map(customerRows.map(c => [Number(c.id), c]));
+    const isInactive = v => v === false || v === 0 || v === '0' || String(v).toLowerCase() === 'false';
+    const activeHalls = hallRows.filter(h => !isInactive(h.active));
+    const visibleHalls = activeHalls.length ? activeHalls : hallRows;
+    const validBookings = bookingRows.filter(b => {
+      const bookingDate = String(b.event_date || '').slice(0, 10);
+      const status = String(b.status || '').toLowerCase();
+      if (bookingDate !== date || ['cancelled','canceled','postponed'].includes(status)) return false;
+      if (period === 'day' && String(b.event_period || '').toLowerCase() !== 'day' && String(b.package_period || '').toLowerCase() !== 'day') return false;
+      return true;
+    }).map(b => {
+      const customer = customerById.get(Number(b.customer_id)) || {};
+      return {
+        ...b,
+        customer_name: b.customer_name || customer.full_name || customer.name || '',
+        phone: b.phone || customer.phone || ''
+      };
+    });
+
+    const halls = visibleHalls.map(h => ({
+      ...h,
+      bookings: validBookings
+        .filter(b => Number(b.hall_id) === Number(h.id))
+        .sort((a,b) => String(a.start_time || '').localeCompare(String(b.start_time || '')))
+    }));
+    res.json({ date, halls });
+  } catch(e) { handleDbError(res,e); }
 });
 app.get('/api/occupancy-calendar', auth, requireDb, async (req,res) => {
-  try { const from=String(req.query.from||''),to=String(req.query.to||from); const all=await rows('bookings'); res.json(all.filter(b=>b.event_date>=from&&b.event_date<=to&&!['cancelled','postponed'].includes(String(b.status||'').toLowerCase()))); }
-  catch(e){ handleDbError(res,e); }
+  try {
+    const from=String(req.query.from||'');
+    const to=String(req.query.to||from);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from > to) {
+      return res.status(400).json({error:'الفترة المحددة لتقويم الغرف غير صحيحة'});
+    }
+    const [roomRows, assignments, bookings, customers] = await Promise.all([
+      rows('bride_rooms'), rows('booking_bride_rooms'), rows('bookings'), rows('customers')
+    ]);
+    const rooms = roomRows
+      .filter(r => r.active !== false && Number(r.active) !== 0)
+      .sort((a,b) => Number(a.id)-Number(b.id))
+      .map(r => ({id:Number(r.id), name:String(r.name||('غرفة العروسة '+r.id))}));
+    const visibleRooms = rooms.length ? rooms : [1,2,3,4,5].map(id => ({id, name:'غرفة العروسة '+id}));
+    const bookingById = new Map(bookings.map(b => [Number(b.id), b]));
+    const customerById = new Map(customers.map(c => [Number(c.id), c]));
+    const roomBookings = assignments.filter(a => {
+      const start = String(a.start_at||'').slice(0,10);
+      const end = String(a.end_at||'').slice(0,10);
+      return start && end && start <= to && end >= from;
+    }).flatMap(a => {
+      const booking = bookingById.get(Number(a.booking_id));
+      if (!booking || ['cancelled','postponed'].includes(String(booking.status||'').toLowerCase())) return [];
+      const customer = customerById.get(Number(booking.customer_id)) || {};
+      return [{
+        ...a,
+        room_id: Number(a.room_id),
+        booking_id: Number(a.booking_id),
+        booking_no: booking.booking_no || '',
+        customer_name: customer.full_name || customer.name || '',
+        start_at: a.start_at || `${booking.event_date||''} ${booking.start_time||'10:00'}`,
+        end_at: a.end_at || `${booking.event_date||''} ${booking.end_time||'23:00'}`
+      }];
+    });
+    res.json({from,to,rooms:visibleRooms,roomBookings});
+  } catch(e) { handleDbError(res,e); }
 });
 app.get('/api/customer-lookup', auth, requireDb, async (req,res) => {
   try { const phone=String(req.query.phone||'').replace(/\D/g,''); if(phone.length<3)return res.json([]); const cs=await rows('customers'); const ids=new Set(cs.filter(c=>String(c.phone||'').replace(/\D/g,'').includes(phone)).map(c=>c.id)); const bs=await rows('bookings'); const out=[]; for(const b of bs.filter(x=>ids.has(x.customer_id))){ const c=cs.find(x=>x.id===b.customer_id)||{}; const h=await one('halls',b.hall_id)||{}; const p=await one('payments',b.id)||{}; out.push({...b,customer_name:c.name||c.full_name||'',phone:c.phone||'',hall_name:h.name||'',paid_amount:Number(p.amount||0)}); } res.json(out); }

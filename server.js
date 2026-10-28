@@ -28,44 +28,18 @@ function auth(req, res, next) {
   }
 }
 
-// استجابة هجينة ذكية جداً تغطي كافة احتمالات الواجهة الأمامية (Array + Object properties)
-function sendHybridResponse(res, dataArray) {
-  const arr = Array.isArray(dataArray) ? dataArray : [];
-  
-  // إنشاء كائن يجمع خصائص المصفوفة والكائن في نفس الوقت لتجنب أي خطأ map/filter/length/reduce
-  const hybridObj = [
-    ...arr
-  ];
-  
-  hybridObj.success = true;
-  hybridObj.rows = arr;
-  hybridObj.data = arr;
-  hybridObj.allRows = arr;
-  hybridObj.list = arr;
-  hybridObj.items = arr;
-  hybridObj.bookings = arr;
-  hybridObj.archive = arr;
-  hybridObj.halls = arr;
-  hybridObj.packages = arr;
-  hybridObj.buffets = arr;
-  hybridObj.offers = arr;
-  hybridObj.total = arr.length;
-  hybridObj.length = arr.length;
-
-  return res.json(hybridObj);
-}
-
-// دالة جلب آمنة من Supabase
+// دالة جلب البيانات مع ضمان إرجاع مصفوفة صريحة
 async function fetchSafeTable(res, tableName) {
   try {
     const { data, error } = await supabase.from(tableName).select('*').order('id', { ascending: false });
-    return sendHybridResponse(res, data);
+    if (error || !Array.isArray(data)) return res.json([]);
+    return res.json(data);
   } catch (err) {
-    return sendHybridResponse(res, []);
+    return res.json([]);
   }
 }
 
-// مسار تسجيل الدخول
+// مسارات تسجيل الدخول
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
   if (String(username || '').trim() === 'admin' && String(password || '').trim() === 'admin123') {
@@ -85,21 +59,26 @@ app.get('/api/me', auth, (req, res) => {
   res.json({ id: 1, username: 'admin', name: 'المدير العام', role: 'admin', permissions: ['all'] });
 });
 
-// قائمة شاملة لكل الجداول والمسارات المحتملة في النظام
+// المسارات المعروفة للنظام
 const tables = [
   'bookings', 'booking_archive', 'halls', 'packages', 'buffet_packages', 
   'buffet_items', 'buffet_addons', 'addons', 'contractors', 'expenses', 
   'inquiries', 'notifications', 'safe_transactions', 'inventory', 'work_orders', 
-  'offers', 'users', 'customers', 'contractor_report', 'sales_performance', 'accounting'
+  'offers', 'users', 'customers'
 ];
 
 tables.forEach(tableName => {
   app.get(`/api/${tableName}`, auth, (req, res) => fetchSafeTable(res, tableName));
 });
 
-// معالج عام لأي مسار آخر قد تطلبه الواجهة الأمامية لمنع أي انهيار نهائياً
+// مسار التقارير والمبيعات والحسابات
+app.get('/api/contractor_report', auth, (req, res) => res.json([]));
+app.get('/api/sales_performance', auth, (req, res) => res.json([]));
+app.get('/api/accounting', auth, (req, res) => res.json([]));
+
+// معالج احتياطي لكل طلبات الـ API
 app.all('/api/*', auth, (req, res) => {
-  return sendHybridResponse(res, []);
+  res.json([]);
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, database: 'supabase', timestamp: new Date().toISOString() }));
@@ -108,4 +87,4 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const port = Number(process.env.PORT || 3000);
-app.listen(port, '0.0.0.0', () => console.log(`مجموعة النسيم تعمل بنجاح على المنفذ ${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`السيرفر يعمل على المنفذ ${port}`));

@@ -746,7 +746,7 @@ app.put('/api/inquiries/:id', auth, requireDb, async (req,res,next)=>{
     res.json({...data,customer_status:data.status,followup});
   } catch(e) { handleDbError(res,e); }
 });
-app.get('/api/inquiries/archive', auth, requireDb, async (req,res)=>{try{const all=await getRows('inquiries');res.json(all.filter(x=>['archived','closed','converted'].includes(String(x.status||'').toLowerCase())))}catch(e){handleDbError(res,e)}});
+app.get('/api/inquiries/archive', auth, requireDb, async (req,res)=>{try{const all=await getRows('inquiries');all.sort((a,b)=>new Date(b.created_at||0)-new Date(a.created_at||0));res.json(all)}catch(e){handleDbError(res,e)}});
 app.get('/api/settings/hall-package-terms', auth, requireDb, async (req,res)=>{try{const {data,error}=await supabase.from('app_settings').select('*').eq('key','hall_package_terms').maybeSingle();if(error)throw error;res.json({terms:data?.value||''})}catch(e){handleDbError(res,e)}});
 app.put('/api/settings/hall-package-terms', auth, requireDb, requireAdmin, async (req,res)=>{try{const value=String(req.body?.terms||'');const {data,error}=await supabase.from('app_settings').upsert({key:'hall_package_terms',value},{onConflict:'key'}).select('*').single();if(error)throw error;res.json(data)}catch(e){handleDbError(res,e)}});
 app.get('/api/settings/hall-table-counts', auth, requireDb, async (req,res)=>{try{const {data,error}=await supabase.from('app_settings').select('value').eq('key','hall_table_counts').maybeSingle();if(error)throw error;let counts={};try{counts=typeof data?.value==='string'?JSON.parse(data.value||'{}'):(data?.value||{});}catch{}res.json({counts:counts&&typeof counts==='object'&&!Array.isArray(counts)?counts:{}})}catch(e){handleDbError(res,e)}});

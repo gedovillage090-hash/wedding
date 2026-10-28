@@ -408,18 +408,118 @@ app.get('/api/cashier/booking-lookup', auth, requireDb, async (req,res)=>{
   try { const digits=String(req.query.phone||'').replace(/\D/g,''); if(digits.length<3)return res.json([]); const customers=await getRows('customers'); const matches=customers.filter(c=>String(c.phone||'').replace(/\D/g,'').includes(digits)); const bookings=await getRows('bookings'); const out=[]; for(const b of bookings.filter(x=>matches.some(c=>c.id===x.customer_id))){const c=matches.find(y=>y.id===b.customer_id)||{};const h=await one('halls',b.hall_id)||{};const pays=await rows('payments',{booking_id:b.id});out.push({...b,customer_name:c.name||c.full_name||'',phone:c.phone||'',hall_name:h.name||'',paid_amount:pays.reduce((n,p)=>n+Number(p.amount||0),0),adjustments_total:0,change_notes:''})} res.json(out); }
   catch(e){handleDbError(res,e)}
 });
-app.get('/api/collection', auth, requireDb, async (req,res)=>{try{const [payments,bookings,customers]=await Promise.all([getRows('payments'),getRows('bookings'),getRows('customers')]);res.json(payments.map(p=>{const b=bookings.find(x=>x.id===p.booking_id)||{};const c=customers.find(x=>x.id===b.customer_id)||{};return {...p,booking_no:b.booking_no||'',event_date:b.event_date||'',customer_name:c.name||c.full_name||'',phone:c.phone||''}}))}catch(e){handleDbError(res,e)}});
+app.get('/api/collection', auth, requireDb, async (req,res)=>{
+  try {
+    const [payments,bookings,customers,halls,packages,discountRequests] = await Promise.all([
+      getRows('payments'),getRows('bookings'),getRows('customers'),getRows('halls'),getRows('hall_packages'),getRows('additional_discount_requests')
+    ]);
+    const customersById = new Map(customers.map(x=>[Number(x.id),x]));
+    const hallsById = new Map(halls.map(x=>[Number(x.id),x]));
+    const packagesById = new Map(packages.map(x=>[Number(x.id),x]));
+    const out = bookings.map(b=>{
+      const customer = customersById.get(Number(b.customer_id)) || {};
+      const hall = hallsById.get(Number(b.hall_id)) || {};
+      const pkg = packagesById.get(Number(b.hall_package_id)) || {};
+      const ownPayments = payments.filter(p=>Number(p.booking_id)===Number(b.id));
+      const paid = ownPayments.reduce((sum,p)=>sum+(String(p.payment_type||'')==='security_refund'?-1:1)*Number(p.amount||0),0);
+      const securityPaid = ownPayments.filter(p=>['security_deposit','deposit'].includes(String(p.payment_type||''))).reduce((sum,p)=>sum+Number(p.amount||0),0);
+      const securityRefunded = ownPayments.filter(p=>String(p.payment_type||'')==='security_refund').reduce((sum,p)=>sum+Number(p.amount||0),0);
+      const lastDiscount = discountRequests.filter(x=>Number(x.booking_id)===Number(b.id)).sort((x,y)=>String(y.created_at||'').localeCompare(String(x.created_at||'')))[0];
+      const finalTotal = Number(b.event_total||0)+Number(b.deposit||0)-Number(b.special_discount||0);
+      return {...b, customer_name:customer.full_name||customer.name||'', phone:customer.phone||'', phone2:customer.phone2||'', hall_name:hall.name||'', package_name:pkg.name||'', paid, paid_total:paid, security_paid:securityPaid, security_refunded:securityRefunded, final_total:finalTotal, amount_due:Math.max(0,finalTotal-paid), special_discount_request_id:lastDiscount?.id||null, latest_discount_status:lastDiscount?.status||''};
+    });
+    res.json(out);
+  } catch(e) { handleDbError(res,e); }
+});
 app.get('/api/collection/payments/:id', auth, requireDb, async (req,res)=>{try{res.json(await rows('payments',{booking_id:Number(req.params.id)}))}catch(e){handleDbError(res,e)}});
-app.get('/api/collection/:id/history', auth, requireDb, async (req,res)=>{try{res.json(await rows('payments',{booking_id:Number(req.params.id)}))}catch(e){handleDbError(res,e)}});
-app.get('/api/collection/receipt/:id', auth, requireDb, async (req,res)=>{try{const p=await one('payments',req.params.id);if(!p)return res.status(404).json({error:'الإيصال غير موجود'});const b=await one('bookings',p.booking_id)||{};const c=await one('customers',b.customer_id)||{};res.json({...p,booking_no:b.booking_no||'',event_date:b.event_date||'',customer_name:c.name||c.full_name||'',phone:c.phone||'',receiver:p.received_by||req.user.id})}catch(e){handleDbError(res,e)}});
-app.get('/api/collection/receipt-by-no/:receiptNo', auth, requireDb, async (req,res)=>{try{const all=await getRows('payments');const p=all.find(x=>String(x.receipt_no)===String(req.params.receiptNo));if(!p)return res.status(404).json({error:'الإيصال غير موجود'});const b=await one('bookings',p.booking_id)||{};const c=await one('customers',b.customer_id)||{};res.json({...p,booking_id:b.id,booking_no:b.booking_no||'',event_date:b.event_date||'',customer_name:c.name||c.full_name||'',phone:c.phone||''})}catch(e){handleDbError(res,e)}});
+app.get('/api/collection/:id/history', auth, requireDb, async (req,res)=>{
+  try {
+    const bookingId = Number(req.params.id);
+    const booking = await one('bookings',bookingId);
+    if(!booking) return res.status(404).json({error:'الحجز غير موجود'});
+    const [payments,customers,halls,packages,users,discountRequests] = await Promise.all([
+      rows('payments',{booking_id:bookingId}),getRows('customers'),getRows('halls'),getRows('hall_packages'),getRows('users'),getRows('additional_discount_requests')
+    ]);
+    const customer = customers.find(x=>Number(x.id)===Number(booking.customer_id)) || {};
+    const hall = halls.find(x=>Number(x.id)===Number(booking.hall_id)) || {};
+    const pkg = packages.find(x=>Number(x.id)===Number(booking.hall_package_id)) || {};
+    const userById = new Map(users.map(x=>[Number(x.id),x]));
+    const decoratedPayments = payments.map(p=>({...p,receiver:userById.get(Number(p.received_by))?.full_name||userById.get(Number(p.received_by))?.username||'—'}));
+    const recordedTypes = {};
+    for(const p of decoratedPayments) recordedTypes[p.payment_type]=(Number(recordedTypes[p.payment_type])||0)+1;
+    const paidTotal = decoratedPayments.reduce((sum,p)=>sum+(String(p.payment_type||'')==='security_refund'?-1:1)*Number(p.amount||0),0);
+    const request = discountRequests.filter(x=>Number(x.booking_id)===bookingId).sort((x,y)=>String(y.created_at||'').localeCompare(String(x.created_at||'')))[0];
+    const bookingView = {...booking,customer_name:customer.full_name||customer.name||'',phone:customer.phone||'',hall_name:hall.name||'',package_name:pkg.name||'',final_total:Number(booking.event_total||0)+Number(booking.deposit||0)-Number(booking.special_discount||0),special_discount_request_id:request?.id||null};
+    res.json({booking:bookingView,payments:decoratedPayments,recorded_types:recordedTypes,paid_total:paidTotal});
+  } catch(e) { handleDbError(res,e); }
+});
+app.get('/api/collection/receipt/:id', auth, requireDb, async (req,res)=>{
+  try {
+    const p=await one('payments',req.params.id);
+    if(!p)return res.status(404).json({error:'الإيصال غير موجود'});
+    const b=await one('bookings',p.booking_id)||{};
+    const [c,h,pkg,allPayments,users]=await Promise.all([
+      one('customers',b.customer_id),one('halls',b.hall_id),one('hall_packages',b.hall_package_id),rows('payments',{booking_id:Number(p.booking_id)}),getRows('users')
+    ]);
+    const receiver=users.find(u=>Number(u.id)===Number(p.received_by));
+    const paidTotal=allPayments.reduce((sum,x)=>sum+(String(x.payment_type||'')==='security_refund'?-1:1)*Number(x.amount||0),0);
+    const securityHeld=allPayments.filter(x=>['security_deposit','deposit'].includes(String(x.payment_type||''))).reduce((sum,x)=>sum+Number(x.amount||0),0);
+    const securityRefunded=allPayments.filter(x=>String(x.payment_type||'')==='security_refund').reduce((sum,x)=>sum+Number(x.amount||0),0);
+    res.json({...p,booking_no:b.booking_no||'',event_date:b.event_date||'',start_time:b.start_time||'',end_time:b.end_time||'',customer_name:c?.full_name||c?.name||'',phone:c?.phone||'',hall_name:h?.name||'',package_name:pkg?.name||'',event_total:Number(b.event_total||0),deposit:Number(b.deposit||0),special_discount:Number(b.special_discount||0),final_total:Number(b.event_total||0)+Number(b.deposit||0)-Number(b.special_discount||0),paid_total:paidTotal,security_held:securityHeld,security_refunded:securityRefunded,receiver:receiver?.full_name||receiver?.username||p.received_by||'—',received_by:receiver?.full_name||receiver?.username||'—'});
+  } catch(e) { handleDbError(res,e); }
+});
+app.get('/api/collection/receipt-by-no/:receiptNo', auth, requireDb, async (req,res)=>{
+  try {
+    const all=await getRows('payments');
+    const p=all.find(x=>String(x.receipt_no)===String(req.params.receiptNo));
+    if(!p)return res.status(404).json({error:'الإيصال غير موجود'});
+    const b=await one('bookings',p.booking_id)||{};
+    const [c,h,allPayments]=await Promise.all([one('customers',b.customer_id),one('halls',b.hall_id),rows('payments',{booking_id:Number(b.id)})]);
+    const held=allPayments.filter(x=>['security_deposit','deposit'].includes(String(x.payment_type||''))).reduce((sum,x)=>sum+Number(x.amount||0),0);
+    const refunded=allPayments.filter(x=>String(x.payment_type||'')==='security_refund').reduce((sum,x)=>sum+Number(x.amount||0),0);
+    res.json({...p,booking_id:b.id,booking_no:b.booking_no||'',event_date:b.event_date||'',customer_name:c?.full_name||c?.name||'',phone:c?.phone||'',hall_name:h?.name||'',security_held:held,security_refunded:refunded,deposit:Number(b.deposit||0)});
+  } catch(e) { handleDbError(res,e); }
+});
+app.delete('/api/collection/payments/:id', auth, requireDb, async (req,res)=>{
+  try {
+    if(req.user.role!=='admin'&&!req.user.permissions?.includes('delete_collections')&&!req.user.permissions?.includes('delete_all_data')) return res.status(403).json({error:'ليس لديك صلاحية مسح الدفعات'});
+    const payment=await one('payments',req.params.id);
+    if(!payment)return res.status(404).json({error:'الدفعة غير موجودة'});
+    if(String(payment.payment_type||'')==='security_refund')return res.status(409).json({error:'لا يمكن مسح قيد رد التأمين من شاشة التحصيل'});
+    const j=await supabase.from('cash_journal').delete().eq('payment_id',Number(payment.id));
+    if(j.error)throw j.error;
+    const d=await supabase.from('payments').delete().eq('id',Number(payment.id));
+    if(d.error)throw d.error;
+    res.json({ok:true,message:'تم مسح الدفعة وقيد الخزنة المرتبط بها'});
+  } catch(e) { handleDbError(res,e); }
+});
+app.post('/api/collection/receipt/:id/reprint', auth, requireDb, async (req,res)=>{
+  try {
+    const payment=await one('payments',req.params.id);
+    if(!payment)return res.status(404).json({error:'الإيصال غير موجود'});
+    const printed=Number(payment.receipt_reprints||0);
+    if(printed>=2)return res.status(409).json({error:'تم استنفاد مرات إعادة الطباعة المسموح بها لهذا الإيصال'});
+    const {data,error}=await supabase.from('payments').update({receipt_reprints:printed+1}).eq('id',Number(payment.id)).eq('receipt_reprints',printed).select('*').maybeSingle();
+    if(error)throw error;
+    if(!data)return res.status(409).json({error:'تم تحديث عدد الطباعة بالتزامن؛ أعد تحميل سجل الدفعات'});
+    res.json({ok:true,print_count:Number(data.receipt_reprints||0),reprints_left:Math.max(0,2-Number(data.receipt_reprints||0))});
+  } catch(e) { handleDbError(res,e); }
+});
+
 app.post('/api/collection/:id/payment', auth, requireDb, async (req,res)=>{
-  try {const booking=await one('bookings',req.params.id);if(!booking)return res.status(404).json({error:'الحجز غير موجود'});const amount=Number(req.body?.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({error:'مبلغ التحصيل غير صحيح'});const receipt_no=receiptNo('RC');const payload={booking_id:booking.id,amount,payment_type:String(req.body?.payment_type||'payment'),paid_at:new Date().toISOString(),received_by:req.user.id,notes:String(req.body?.notes||''),receipt_no,method:String(req.body?.method||'cash'),reference:req.body?.reference||null};const {data,error}=await supabase.from('payments').insert(payload).select('*').single();if(error)throw error;const journal={entry_no:receiptNo('CJ'),entry_type:'income',category:payload.payment_type,amount,method:payload.method,description:payload.notes||`تحصيل للحجز ${booking.booking_no}`,booking_id:booking.id,payment_id:data.id,created_by:req.user.id,payee:''};const j=await supabase.from('cash_journal').insert(journal);if(j.error){await supabase.from('payments').delete().eq('id',data.id);throw j.error;}res.status(201).json({ok:true,payment_id:data.id,receipt_no,amount});}
+  try {const booking=await one('bookings',req.params.id);if(!booking)return res.status(404).json({error:'الحجز غير موجود'});const amount=Number(req.body?.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({error:'مبلغ التحصيل غير صحيح'});const receipt_no=receiptNo('RC');const payload={booking_id:booking.id,amount,payment_type:String(req.body?.payment_type||'payment'),paid_at:new Date().toISOString(),received_by:req.user.id,notes:String(req.body?.notes||''),receipt_no,method:String(req.body?.method||'cash'),reference:req.body?.reference||null};const {data,error}=await supabase.from('payments').insert(payload).select('*').single();if(error)throw error;const isRefund=payload.payment_type==='security_refund';const journal={entry_no:receiptNo('CJ'),entry_type:isRefund?'expense':'income',category:isRefund?'رد تأمين':payload.payment_type,amount,method:payload.method,description:payload.notes||(isRefund?`رد تأمين للحجز ${booking.booking_no}`:`تحصيل للحجز ${booking.booking_no}`),booking_id:booking.id,payment_id:data.id,created_by:req.user.id,payee:''};const j=await supabase.from('cash_journal').insert(journal);if(j.error){await supabase.from('payments').delete().eq('id',data.id);throw j.error;}res.status(201).json({ok:true,payment_id:data.id,receipt_no,amount});}
   catch(e){handleDbError(res,e)}
 });
 app.post('/api/cash-journal/expense', auth, requireDb, async (req,res)=>{
-  try {const amount=Number(req.body?.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({error:'مبلغ المصروف غير صحيح'});const entry_no=receiptNo('EX');const payload={entry_no,entry_type:'expense',category:String(req.body?.category||'مصروف'),amount,method:String(req.body?.method||'cash'),description:String(req.body?.description||''),created_by:req.user.id,payee:String(req.body?.payee||'')};const {data,error}=await supabase.from('cash_journal').insert(payload).select('*').single();if(error)throw error;res.status(201).json({...data,receipt_no:entry_no});}
-  catch(e){handleDbError(res,e)}
+  try {
+    const amount=Number(req.body?.amount);if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({error:'مبلغ المصروف غير صحيح'});
+    const entry_no=receiptNo('EX');
+    const payload={entry_no,entry_type:'expense',category:String(req.body?.category||'مصروف'),amount,method:String(req.body?.method||'cash'),description:String(req.body?.description||''),created_by:req.user.id,payee:String(req.body?.payee||'')};
+    const {data,error}=await supabase.from('cash_journal').insert(payload).select('*').single();if(error)throw error;
+    const receipt=await supabase.from('expense_receipts').insert({journal_id:data.id,receipt_no:entry_no,payee:payload.payee,invoice_image:req.body?.invoice_image||null,print_count:0}).select('*').single();
+    if(receipt.error){await supabase.from('cash_journal').delete().eq('id',data.id);throw receipt.error;}
+    res.status(201).json({...data,receipt_no:receipt.data.receipt_no,receipt_id:receipt.data.id,print_count:receipt.data.print_count});
+  }catch(e){handleDbError(res,e)}
 });
 app.post('/api/booking-change-requests/:id/decision', auth, requireDb, requireAdmin, async (req,res)=>{
  try {const status=String(req.body?.decision||'');if(!['approved','rejected'].includes(status))return res.status(400).json({error:'قرار غير صحيح'});const row=await one('booking_change_requests',req.params.id);if(!row)return res.status(404).json({error:'الطلب غير موجود'});if(row.status!=='pending')return res.status(409).json({error:'تم اتخاذ قرار على هذا الطلب مسبقًا'});const {data,error}=await supabase.from('booking_change_requests').update({status,reviewed_by:req.user.id,review_note:String(req.body?.note||''),reviewed_at:new Date().toISOString(),amount:Number(req.body?.amount||row.amount||0)}).eq('id',row.id).select('*').single();if(error)throw error;if(status==='approved'){const changes={};if(row.change_type==='change_date'&&row.new_event_date)changes.event_date=row.new_event_date;if(row.new_start_time)changes.start_time=row.new_start_time;if(row.new_end_time)changes.end_time=row.new_end_time;if(row.change_type==='cancel')changes.status='cancelled';if(Object.keys(changes).length){const u=await supabase.from('bookings').update(changes).eq('id',row.booking_id);if(u.error)throw u.error;}}res.json({ok:true,message:status==='approved'?'تمت الموافقة وتطبيق التعديل المتاح':'تم رفض الطلب',request:data});}
@@ -588,6 +688,232 @@ app.post('/api/bookings', auth, requireDb, async (req,res)=>{
 });
 app.post('/api/bookings/:id/change-requests', auth, requireDb, async (req,res)=>{try{const b=await one('bookings',req.params.id);if(!b)return res.status(404).json({error:'الحجز غير موجود'});const d=req.body||{};const payload={booking_id:b.id,requested_by:req.user.id,change_type:String(d.change_type||d.type||'change_date'),old_event_date:b.event_date,new_event_date:d.new_event_date||d.event_date||null,new_start_time:d.new_start_time||d.start_time||null,new_end_time:d.new_end_time||d.end_time||null,item_action:d.item_action||null,item_details:d.item_details||null,reason:String(d.reason||''),amount:Number(d.amount||0),status:'pending'};if(!payload.reason)return res.status(400).json({error:'سبب الطلب مطلوب'});const {data,error}=await supabase.from('booking_change_requests').insert(payload).select('*').single();if(error)throw error;res.status(201).json({ok:true,message:'تم إرسال الطلب للمدير للمراجعة',request:data})}catch(e){handleDbError(res,e)}});
 app.post('/api/bookings/:id/cancel', auth, requireDb, async (req,res)=>{try{const b=await one('bookings',req.params.id);if(!b)return res.status(404).json({error:'الحجز غير موجود'});if(req.user.role!=='admin'){return res.status(403).json({error:'إلغاء الحجز يتطلب موافقة المدير'});}const {data,error}=await supabase.from('bookings').update({status:'cancelled',cancel_reason:String(req.body?.reason||'')}).eq('id',b.id).select('*').single();if(error)throw error;await supabase.from('booking_status_history').insert({booking_id:b.id,old_status:b.status,new_status:'cancelled',old_event_date:b.event_date,new_event_date:b.event_date,reason:String(req.body?.reason||''),changed_by:req.user.id});res.json(data)}catch(e){handleDbError(res,e)}});
+
+// Specialized endpoints for cashbox and expense receipts. The UI needs joined journal, booking, user and receipt fields.
+app.get('/api/cash-journal', auth, requireDb, async (req,res)=>{
+  try {
+    const [journal,payments,receipts,bookings,customers,users,contractors]=await Promise.all([
+      getRows('cash_journal'),getRows('payments'),getRows('expense_receipts'),getRows('bookings'),getRows('customers'),getRows('users'),getRows('contractors')
+    ]);
+    const usersById=new Map(users.map(x=>[Number(x.id),x]));
+    const bookingsById=new Map(bookings.map(x=>[Number(x.id),x]));
+    const paymentsById=new Map(payments.map(x=>[Number(x.id),x]));
+    const receiptsByJournalId=new Map(receipts.map(x=>[Number(x.journal_id),x]));
+    const contractorsById=new Map(contractors.map(x=>[Number(x.id),x]));
+    const rowsOut=journal.map(j=>{
+      const b=bookingsById.get(Number(j.booking_id))||{};
+      const c=customers.find(x=>Number(x.id)===Number(b.customer_id))||{};
+      const pay=paymentsById.get(Number(j.payment_id))||{};
+      const receipt=receiptsByJournalId.get(Number(j.id))||{};
+      const contractor=contractorsById.get(Number(j.contractor_id))||{};
+      const user=usersById.get(Number(j.created_by))||{};
+      return {...j,booking_no:b.booking_no||'',event_date:b.event_date||'',customer_name:c.full_name||c.name||'',phone:c.phone||'',employee:user.full_name||user.username||'النظام',payment_receipt_no:pay.receipt_no||'',receipt_no:receipt.receipt_no||pay.receipt_no||'',receipt_id:receipt.id||null,print_count:Number(receipt.print_count||0),invoice_image:receipt.invoice_image||null,contractor_name:contractor.full_name||contractor.name||''};
+    }).filter(x=>String(req.query.scope||'')!=='expenses'||x.entry_type==='expense');
+    res.json(rowsOut);
+  } catch(e) { handleDbError(res,e); }
+});
+app.get('/api/expense-receipts', auth, requireDb, async (req,res)=>{
+  try {
+    const [receipts,journal,users]=await Promise.all([getRows('expense_receipts'),getRows('cash_journal'),getRows('users')]);
+    const out=receipts.map(r=>{const j=journal.find(x=>Number(x.id)===Number(r.journal_id))||{};const u=users.find(x=>Number(x.id)===Number(j.created_by))||{};return {...r,entry_no:j.entry_no||'',entry_type:j.entry_type||'expense',category:j.category||'',amount:Number(j.amount||0),method:j.method||'',description:j.description||'',payee:r.payee||j.payee||'',created_at:j.created_at||r.created_at,employee:u.full_name||u.username||'النظام'};});
+    res.json(out);
+  } catch(e) { handleDbError(res,e); }
+});
+app.get('/api/expense-receipts/:id', auth, requireDb, async (req,res)=>{
+  try {
+    const receipt=await one('expense_receipts',req.params.id);
+    if(!receipt)return res.status(404).json({error:'إيصال المصروف غير موجود'});
+    const journal=await one('cash_journal',receipt.journal_id);
+    if(!journal)return res.status(404).json({error:'قيد المصروف المرتبط بالإيصال غير موجود'});
+    res.json({...receipt,receipt_id:receipt.id,entry_no:journal.entry_no,entry_type:journal.entry_type,category:journal.category,amount:journal.amount,method:journal.method,description:journal.description,payee:receipt.payee||journal.payee||'',created_at:journal.created_at,created_by:journal.created_by});
+  } catch(e) { handleDbError(res,e); }
+});
+app.post('/api/expense-receipts/:id/print', auth, requireDb, async (req,res)=>{
+  try {
+    const receipt=await one('expense_receipts',req.params.id);
+    if(!receipt)return res.status(404).json({error:'إيصال المصروف غير موجود'});
+    const count=Number(receipt.print_count||0);
+    if(count>=3)return res.status(409).json({error:'تم استنفاد مرات طباعة إيصال المصروف المسموح بها (3 مرات)'});
+    const {data,error}=await supabase.from('expense_receipts').update({print_count:count+1}).eq('id',Number(receipt.id)).eq('print_count',count).select('*').maybeSingle();
+    if(error)throw error;
+    if(!data)return res.status(409).json({error:'تم تحديث عدد الطباعة بالتزامن؛ حدّث الصفحة'});
+    res.json({ok:true,print_count:Number(data.print_count||0),reprints_left:Math.max(0,3-Number(data.print_count||0))});
+  } catch(e) { handleDbError(res,e); }
+});
+
+// Work-order APIs are explicit because the work-order screen expects a joined payload, not a raw work_orders table.
+const WORK_ORDER_TYPES={hall:{code:'HALL',title:'أمر تجهيز القاعة'},kitchen:{code:'KITCHEN',title:'أمر تشغيل المطبخ'},store:{code:'STORE',title:'أمر تجهيز المخزن'},contractor:{code:'CONTRACTOR',title:'أمر تشغيل المتعهد'}};
+const drinkPattern=/(مياه|مياة|ماء|زجاجة|كانز|كنز|سوفت|درينك|عصير|كولا|بيبسي|سفن|7\s*up|water|juice|soft.?drink|can)/i;
+async function workOrderContext(booking){
+  const [customer,hall,pkg,bookingBuffets,bufferPackages,bufferItems,packageItems,bookingAddons,addons,operationalAddons,inventory,contractors,assignments]=await Promise.all([
+    one('customers',booking.customer_id),one('halls',booking.hall_id),one('hall_packages',booking.hall_package_id),rows('booking_buffets',{booking_id:Number(booking.id)}),getRows('buffet_packages'),getRows('buffet_items'),getRows('buffet_package_items'),rows('booking_addons',{booking_id:Number(booking.id)}),getRows('addons'),rows('booking_operational_addons',{booking_id:Number(booking.id)}),getRows('inventory_items'),getRows('contractors'),rows('booking_work_contractors',{booking_id:Number(booking.id)})
+  ]);
+  return {booking,customer:customer||{},hall:hall||{},pkg:pkg||{},bookingBuffets,bufferPackages,bufferItems,packageItems,bookingAddons,addons,operationalAddons,inventory,contractors,assignments};
+}
+function workOrderSpecs(context,type,contractorAssignment=null){
+  const {booking,customer,hall,pkg,bookingBuffets,bufferPackages,bufferItems,packageItems,bookingAddons,addons,operationalAddons,inventory}=context;
+  const specs=[];
+  if(type==='hall'){
+    specs.push({item_name:hall.name||'القاعة',quantity:1,unit:'قاعة',details:''});
+    specs.push({item_name:'عدد الأفراد',quantity:Number(booking.guest_count||0),unit:'فرد',details:''});
+    if(pkg.name)specs.push({item_name:'باكدج القاعة — '+pkg.name,quantity:1,unit:'باكدج',details:''});
+    for(const item of operationalAddons)specs.push({item_name:String(item.name_snapshot||'إضافة تشغيل'),quantity:Number(item.quantity||1),unit:'وحدة',details:''});
+  } else if(type==='kitchen'){
+    for(const selected of bookingBuffets){const buffet=bufferPackages.find(x=>Number(x.id)===Number(selected.buffet_package_id));if(buffet)specs.push({item_name:String(buffet.name),quantity:Number(selected.guest_count||booking.guest_count||0),unit:'فرد',details:'باكدج البوفيه'});}
+    for(const selected of bookingAddons){const addon=addons.find(x=>Number(x.id)===Number(selected.addon_id));const name=String(addon?.name||'إضافة بوفيه');if(drinkPattern.test(name))continue;specs.push({item_name:name,quantity:Number(selected.guest_count||booking.guest_count||0)*Number(selected.quantity_per_person||1),unit:'قطعة',details:''});}
+    if(Number(booking.free_meals||0)>0)specs.push({item_name:String(booking.free_meals_description||booking.free_meal_name||'وجبات هدية'),quantity:Number(booking.free_meals),unit:'وجبة',details:'ضمن العرض'});
+  } else if(type==='store'){
+    const totals=new Map();
+    const addInventory=(inv,qty,detail)=>{if(!inv||!(inv.active===true||Number(inv.active)===1)||!Number.isFinite(qty)||qty<=0)return;const k=Number(inv.id);const old=totals.get(k)||{item_name:String(inv.name||'صنف مخزن'),quantity:0,unit:String(inv.unit||'وحدة'),details:detail||''};old.quantity+=qty;if(detail&&!old.details.includes(detail))old.details=[old.details,detail].filter(Boolean).join('، ');totals.set(k,old)};
+    for(const selected of bookingBuffets){
+      const buffet=bufferPackages.find(x=>Number(x.id)===Number(selected.buffet_package_id));
+      const selectedItems=packageItems.filter(x=>Number(x.package_id)===Number(selected.buffet_package_id));
+      for(const rel of selectedItems){
+        const linked=inventory.filter(i=>Number(i.buffet_item_id)===Number(rel.item_id)&&String(i.source_type||'menu')!=='addon');
+        const qty=Number(selected.guest_count||booking.guest_count||0)*Number(rel.quantity||0);
+        for(const inv of linked)addInventory(inv,qty*Number(inv.units_per_buffet_unit||1),buffet?.name||'باكدج البوفيه');
+      }
+    }
+    for(const selected of bookingAddons){
+      const linked=inventory.filter(i=>Number(i.addon_id)===Number(selected.addon_id)&&String(i.source_type||'')==='addon');
+      const addon=addons.find(x=>Number(x.id)===Number(selected.addon_id));
+      const qty=Number(selected.guest_count||booking.guest_count||0)*Number(selected.quantity_per_person||1);
+      for(const inv of linked)addInventory(inv,qty*Number(inv.units_per_buffet_unit||1),addon?.name||'إضافة');
+    }
+    specs.push(...[...totals.values()].sort((a,b)=>a.item_name.localeCompare(b.item_name,'ar')));
+  } else if(type==='contractor'&&contractorAssignment){
+    const contractor=(context.contractors||[]).find(c=>Number(c.id)===Number(contractorAssignment.contractor_id))||{};
+    const details=String(contractorAssignment.service_details||'').trim();
+    specs.push({item_name:details||contractor.job_title||'الخدمة المطلوبة',quantity:1,unit:'خدمة',details:''});
+  }
+  return specs;
+}
+async function saveWorkOrder(booking,type,specs,userId,contractorId=null,notes=''){
+  const meta=WORK_ORDER_TYPES[type];
+  if(!meta)throw new Error('نوع أمر التشغيل غير صحيح');
+  const allExisting=await rows('work_orders',{booking_id:Number(booking.id),order_type:type});
+  const existing=allExisting.find(x=>contractorId===null?x.contractor_id===null||x.contractor_id===undefined:Number(x.contractor_id)===Number(contractorId));
+  const now=new Date().toISOString();
+  let order;
+  if(existing){
+    const version=Number(existing.version||1)+1;
+    const upd=await supabase.from('work_orders').update({title:meta.title,status:'new',version,updated_at:now,notes:String(notes||'')}).eq('id',Number(existing.id)).select('*').single();
+    if(upd.error)throw upd.error;order=upd.data;
+    const del=await supabase.from('work_order_lines').delete().eq('work_order_id',Number(order.id));if(del.error)throw del.error;
+    const hist=await supabase.from('work_order_history').insert({work_order_id:order.id,version,action:'updated',details:JSON.stringify({serial_no:order.serial_no,title:meta.title,lines_count:specs.length}),user_id:userId});if(hist.error)throw hist.error;
+  } else {
+    const current=await getRows('work_orders');const nextNo=Math.max(0,...current.map(x=>Number(x.id)||0))+1;const serial_no=`WO-${meta.code}-${String(nextNo).padStart(7,'0')}`;
+    const ins=await supabase.from('work_orders').insert({serial_no,booking_id:Number(booking.id),order_type:type,contractor_id:contractorId,title:meta.title,status:'new',version:1,created_by:userId,updated_at:now,notes:String(notes||'')}).select('*').single();
+    if(ins.error)throw ins.error;order=ins.data;
+    const hist=await supabase.from('work_order_history').insert({work_order_id:order.id,version:1,action:'created',details:JSON.stringify({serial_no,title:meta.title,lines_count:specs.length}),user_id:userId});if(hist.error)throw hist.error;
+  }
+  const cleanSpecs=specs.filter(x=>String(x.item_name||'').trim()).map(x=>({work_order_id:Number(order.id),item_name:String(x.item_name),quantity:Number.isFinite(Number(x.quantity))?Number(x.quantity):1,unit:String(x.unit||''),details:String(x.details||'')}));
+  if(cleanSpecs.length){const insLines=await supabase.from('work_order_lines').insert(cleanSpecs);if(insLines.error)throw insLines.error;}
+  return order;
+}
+async function decorateWorkOrder(order,context){
+  const booking=context.bookingsById.get(Number(order.booking_id))||{};
+  const customer=context.customersById.get(Number(booking.customer_id))||{};
+  const hall=context.hallsById.get(Number(booking.hall_id))||{};
+  const pkg=context.packagesById.get(Number(booking.hall_package_id))||{};
+  const contractor=context.contractorsById.get(Number(order.contractor_id))||{};
+  return {...order,booking_no:booking.booking_no||'',customer_name:customer.full_name||customer.name||'',customer_phone:customer.phone||'',phone:customer.phone||'',hall_name:hall.name||'',package_name:pkg.name||'',event_date:booking.event_date||'',start_time:booking.start_time||'',end_time:booking.end_time||'',guest_count:Number(booking.guest_count||0),contractor_name:contractor.full_name||contractor.contractor_name||'',contractor_job:contractor.job_title||'',lines:context.lines.filter(x=>Number(x.work_order_id)===Number(order.id))};
+}
+app.get('/api/work-orders', auth, requireDb, async (req,res)=>{
+  try{
+    const [bookings,customers,halls,packages,orders,lines,contractors]=await Promise.all([getRows('bookings'),getRows('customers'),getRows('halls'),getRows('hall_packages'),getRows('work_orders'),getRows('work_order_lines'),getRows('contractors')]);
+    const customersById=new Map(customers.map(x=>[Number(x.id),x]));
+    const hallsById=new Map(halls.map(x=>[Number(x.id),x]));
+    const packagesById=new Map(packages.map(x=>[Number(x.id),x]));
+    const bookingsById=new Map(bookings.map(x=>[Number(x.id),x]));
+    const contractorsById=new Map(contractors.map(x=>[Number(x.id),x]));
+    const bookingViews=bookings.map(b=>{const c=customersById.get(Number(b.customer_id))||{};const h=hallsById.get(Number(b.hall_id))||{};const p=packagesById.get(Number(b.hall_package_id))||{};return {...b,customer_name:c.full_name||c.name||'',customer_phone:c.phone||'',phone:c.phone||'',hall_name:h.name||'',package_name:p.name||''};});
+    if(req.query.booking_phone!==undefined){
+      const q=String(req.query.booking_phone||'').replace(/\D/g,'');
+      if(q.length<3)return res.json({bookings:[]});
+      const matchingIds=new Set(customers.filter(c=>{const p=String(c.phone||'').replace(/\D/g,'');return p.includes(q)||q.includes(p)||p.slice(-10)===q.slice(-10)}).map(c=>Number(c.id)));
+      return res.json({bookings:bookingViews.filter(b=>matchingIds.has(Number(b.customer_id))&&!['cancelled','completed'].includes(String(b.status||'').toLowerCase()))});
+    }
+    const phone=String(req.query.q||'').replace(/\D/g,'');
+    let filteredOrders=orders.map(order=>({...order,lines:lines.filter(l=>Number(l.work_order_id)===Number(order.id))}));
+    const filterType=String(req.query.type||''),filterStatus=String(req.query.status||''),from=String(req.query.from||''),to=String(req.query.to||'');
+    const q=String(req.query.q||'').trim().toLowerCase();
+    const rowsOut=[];
+    for(const order of filteredOrders){
+      const booking=bookingsById.get(Number(order.booking_id))||{};const customer=customersById.get(Number(booking.customer_id))||{};const hall=hallsById.get(Number(booking.hall_id))||{};const contractor=contractorsById.get(Number(order.contractor_id))||{};
+      const date=String(booking.event_date||'').slice(0,10);
+      if(filterType&&order.order_type!==filterType)continue;if(filterStatus&&order.status!==filterStatus)continue;if(from&&date<from)continue;if(to&&date>to)continue;
+      const search=[order.serial_no,order.title,booking.booking_no,customer.full_name,customer.name,customer.phone,hall.name,contractor.full_name,contractor.job_title].join(' ').toLowerCase();if(q&&!search.includes(q)&&!(phone.length>=3&&String(customer.phone||'').replace(/\D/g,'').includes(phone)))continue;
+      rowsOut.push(order);
+    }
+    const context={bookingsById,customersById,hallsById,packagesById,contractorsById,lines};
+    const decorated=[];for(const order of rowsOut)decorated.push(await decorateWorkOrder(order,context));
+    const eligibleBookings=bookingViews.filter(b=>String(b.booking_stage||'')==='confirmed'&&!['cancelled','completed'].includes(String(b.status||'').toLowerCase()));
+    const eligibleContractors=contractors.filter(c=>c.active===undefined||c.active===null||c.active===true||Number(c.active)===1).map(c=>({...c,hall_name:hallsById.get(Number(c.hall_id))?.name||''}));
+    res.json({rows:decorated,bookings:eligibleBookings,contractors:eligibleContractors});
+  }catch(e){handleDbError(res,e)}
+});
+app.post('/api/work-orders/generate/:id', auth, requireDb, async (req,res)=>{
+  try{
+    const booking=await one('bookings',req.params.id);if(!booking)return res.status(404).json({error:'الحجز غير موجود'});
+    if(String(booking.booking_stage||'')!=='confirmed')return res.status(409).json({error:'لا يمكن إصدار أوامر الشغل قبل تأكيد الحجز من الإدارة.'});
+    if(['cancelled','completed'].includes(String(booking.status||'').toLowerCase()))return res.status(409).json({error:'لا يمكن إصدار أوامر شغل لحجز ملغي أو مكتمل.'});
+    const context=await workOrderContext(booking);
+    const core=[['hall','أمر تجهيز القاعة'],['kitchen','أمر تشغيل المطبخ'],['store','أمر تجهيز المخزن']];
+    const saved=[];for(const [type] of core){const specs=workOrderSpecs(context,type);saved.push(await saveWorkOrder(booking,type,specs,req.user.id,null,String(booking.notes||'')));}
+    res.json({ok:true,message:'تم إصدار/تحديث أوامر القاعة والمطبخ والمخزن بنجاح',orders:saved});
+  }catch(e){handleDbError(res,e)}
+});
+app.post('/api/work-orders/assign-contractor/:id', auth, requireDb, async (req,res)=>{
+  try{
+    const booking=await one('bookings',req.params.id);if(!booking)return res.status(404).json({error:'الحجز غير موجود'});
+    if(String(booking.booking_stage||'')!=='confirmed'||['cancelled','completed'].includes(String(booking.status||'').toLowerCase()))return res.status(409).json({error:'إسناد المتعهد متاح للحجز المؤكد والفعال فقط.'});
+    const contractorId=Number(req.body?.contractor_id),cost=Number(req.body?.cost_amount||0),details=String(req.body?.service_details||'').trim();
+    if(!Number.isInteger(contractorId)||contractorId<=0)return res.status(400).json({error:'اختر متعهدًا صحيحًا.'});
+    if(!Number.isFinite(cost)||cost<0)return res.status(400).json({error:'التكلفة الداخلية غير صحيحة.'});
+    if(!details)return res.status(400).json({error:'اكتب تفاصيل الخدمة المطلوبة للمتعهد.'});
+    const contractor=await one('contractors',contractorId);if(!contractor||!(contractor.active===true||Number(contractor.active)===1))return res.status(404).json({error:'المتعهد غير موجود أو غير نشط.'});
+    const {data:hall}=await supabase.from('halls').select('name').eq('id',Number(booking.hall_id)).maybeSingle();
+    const existingLinks=await rows('booking_work_contractors',{booking_id:Number(booking.id),contractor_id:contractorId});
+    let assignment;
+    if(existingLinks.length){const upd=await supabase.from('booking_work_contractors').update({cost_amount:cost,service_details:details,created_by:req.user.id,active:1}).eq('id',Number(existingLinks[0].id)).select('*').single();if(upd.error)throw upd.error;assignment=upd.data;}
+    else {const ins=await supabase.from('booking_work_contractors').insert({booking_id:Number(booking.id),contractor_id:contractorId,cost_amount:cost,service_details:details,created_by:req.user.id,active:1}).select('*').single();if(ins.error)throw ins.error;assignment=ins.data;}
+    const oldLink=await rows('booking_contractors',{booking_id:Number(booking.id),contractor_id:contractorId});
+    const linkPayload={booking_id:Number(booking.id),contractor_id:contractorId,contractor_name:String(contractor.full_name||contractor.name||''),job_title:String(contractor.job_title||''),hall_name:String(hall?.name||''),cost_amount:cost};
+    if(oldLink.length){const upd=await supabase.from('booking_contractors').update(linkPayload).eq('id',Number(oldLink[0].id));if(upd.error)throw upd.error;}
+    else {const ins=await supabase.from('booking_contractors').insert(linkPayload);if(ins.error)throw ins.error;}
+    const context=await workOrderContext(booking);const spec=workOrderSpecs(context,'contractor',assignment);const order=await saveWorkOrder(booking,'contractor',spec,req.user.id,contractorId,details);
+    res.json({ok:true,message:'تم إسناد المتعهد وإنشاء/تحديث أمر التشغيل الخاص به',assignment,order});
+  }catch(e){handleDbError(res,e)}
+});
+app.put('/api/work-orders/:id/status', auth, requireDb, async (req,res)=>{
+  try{
+    const allowedStatus=['new','printed','delivered','in_progress','completed','cancelled'];const status=String(req.body?.status||'');if(!allowedStatus.includes(status))return res.status(400).json({error:'حالة أمر التشغيل غير صحيحة'});
+    const order=await one('work_orders',req.params.id);if(!order)return res.status(404).json({error:'أمر التشغيل غير موجود'});
+    const {data,error}=await supabase.from('work_orders').update({status,updated_at:new Date().toISOString()}).eq('id',Number(order.id)).select('*').single();if(error)throw error;
+    if(status!==order.status){const hist=await supabase.from('work_order_history').insert({work_order_id:Number(order.id),version:Number(order.version||1),action:'status_changed',details:JSON.stringify({old_status:order.status,new_status:status}),user_id:req.user.id});if(hist.error)throw hist.error;}
+    res.json(data);
+  }catch(e){handleDbError(res,e)}
+});
+app.get('/api/work-orders/:id/history', auth, requireDb, async (req,res)=>{
+  try{
+    const id=Number(req.params.id);const order=await one('work_orders',id);if(!order)return res.status(404).json({error:'أمر التشغيل غير موجود'});
+    const [history,users]=await Promise.all([rows('work_order_history',{work_order_id:id}),getRows('users')]);const userById=new Map(users.map(x=>[Number(x.id),x]));
+    res.json(history.map(x=>({...x,employee:userById.get(Number(x.user_id))?.full_name||userById.get(Number(x.user_id))?.username||'النظام'})).sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||''))));
+  }catch(e){handleDbError(res,e)}
+});
+app.post('/api/contractor-payouts', auth, requireDb, async (req,res)=>{
+  try{
+    const contractorId=Number(req.body?.contractor_id),bookingId=Number(req.body?.booking_id)||null,amount=Number(req.body?.amount);
+    if(!Number.isInteger(contractorId)||contractorId<=0)return res.status(400).json({error:'اختر متعهدًا صحيحًا'});if(!Number.isFinite(amount)||amount<=0)return res.status(400).json({error:'مبلغ الصرف غير صحيح'});
+    const contractor=await one('contractors',contractorId);if(!contractor)return res.status(404).json({error:'المتعهد غير موجود'});
+    const method=String(req.body?.method||'cash'),reference=String(req.body?.reference||''),notes=String(req.body?.notes||''),receipt_no=receiptNo('CP'),entry_no=receiptNo('EX');
+    const {data:journal,error:jerr}=await supabase.from('cash_journal').insert({entry_no,entry_type:'expense',category:'مستحقات متعهد',amount,method,description:notes||`صرف مستحقات المتعهد ${contractor.full_name||contractor.name||''}`,booking_id:bookingId,contractor_id:contractorId,created_by:req.user.id,payee:String(contractor.full_name||contractor.name||'')}).select('*').single();if(jerr)throw jerr;
+    const {data,error}=await supabase.from('contractor_payouts').insert({receipt_no,contractor_id:contractorId,amount,method,reference,notes,paid_by:req.user.id,journal_id:journal.id,created_at:new Date().toISOString(),booking_id:bookingId}).select('*').single();
+    if(error){await supabase.from('cash_journal').delete().eq('id',journal.id);throw error;}
+    res.status(201).json({...data,entry_no:journal.entry_no,payee:journal.payee});
+  }catch(e){handleDbError(res,e)}
+});
 
 // Table CRUD for standard catalog and records. Unknown table names are never queried.
 app.get('/api/:resource', auth, requireDb, async (req, res, next) => {

@@ -823,12 +823,20 @@ function workOrderSpecs(context,type,contractorAssignment=null){
         const menuItem=bufferItems.find(x=>Number(x.id)===Number(rel.item_id));
         const linked=inventory.filter(i=>Number(i.buffet_item_id)===Number(rel.item_id)&&String(i.source_type||'menu')!=='addon');
         const menuName=String(menuItem?.name||menuItem?.item_name||'').trim();
-        const isWaterBottle=/(ازازة|زجاجة|عبوة)\s*(مياه|مياة|ماء)|(?:مياه|مياة|ماء)\s*(?:ازازة|زجاجة|عبوة)/i.test(menuName);
+        // Normalize Arabic spelling variants before classifying water-bottle menu items.
+        const normalizedMenuName=menuName.replace(/[\u064B-\u065F\u0670ـ]/g,'').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/\s+/g,' ').trim().toLowerCase();
+        const hasWater=/ماء|مياه|مياه|مياة|water/.test(normalizedMenuName);
+        const hasBottle=/ازازه|زجاجه|عبوه|قاروره|bottle/.test(normalizedMenuName);
+        const isWaterBottle=hasWater&&hasBottle;
         const configuredHallTableCount=Number(hallTableCounts[String(booking.hall_id)]||hallTableCounts[Number(booking.hall_id)]||0);
         const tableCount=configuredHallTableCount||Number(selected.table_count||selected.tables_count||booking.table_count||booking.tables_count||booking.number_of_tables||0);
-        // Water bottle quantities in buffet menus are per table, not per guest.
-        // If a table count is explicitly stored, use it; otherwise preserve the package's configured quantity as one table's requirement.
-        const qty=(isWaterBottle?(tableCount>0?tableCount:1):Number(selected.guest_count||booking.guest_count||0))*Number(rel.quantity||0);
+        const packageItemQuantity=Number(rel.quantity||0);
+        // Water bottles are per table; all other drinks are per total booked guest,
+        // including guests covered by a free-meal promotion. Food follows the selected buffet quantity.
+        const isDrink=!isWaterBottle&&drinkPattern.test(menuName);
+        const guestQuantity=isDrink?Number(booking.guest_count||0):Number(selected.guest_count||booking.guest_count||0);
+        const qty=(isWaterBottle?(tableCount>0?tableCount:0):guestQuantity)*packageItemQuantity;
+        if(isWaterBottle&&tableCount<=0) console.warn(`[work-orders] Missing table count for hall ${booking.hall_id}; water item "${menuName}" was skipped rather than incorrectly multiplied by guests.`);
         for(const inv of linked)addInventory(inv,qty*Number(inv.units_per_buffet_unit||1),buffet?.name||'باكدج البوفيه');
         // Drinks must appear on the store order even when no inventory mapping exists yet.
         if(!linked.length && menuName && drinkPattern.test(menuName) && qty>0){

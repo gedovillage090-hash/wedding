@@ -825,11 +825,11 @@ function workOrderSpecs(context,type,contractorAssignment=null){
         const menuName=String(menuItem?.name||menuItem?.item_name||'').trim();
         // Normalize Arabic spelling variants before classifying water-bottle menu items.
         const normalizedMenuName=menuName.replace(/[\u064B-\u065F\u0670ـ]/g,'').replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/\s+/g,' ').trim().toLowerCase();
-        const hasWater=/ماء|مياه|مياه|مياة|water/.test(normalizedMenuName);
-        const hasBottle=/ازازه|زجاجه|عبوه|قاروره|bottle/.test(normalizedMenuName);
+        const hasWater=/ماء|مياه|مياة|مايه|water/.test(normalizedMenuName);
+        const hasBottle=/ازازه|ازازه|زجاجه|زجاج|عبوه|قاروره|قنينه|bottle/.test(normalizedMenuName);
         const isWaterBottle=hasWater&&hasBottle;
         const configuredHallTableCount=Number(hallTableCounts[String(booking.hall_id)]||hallTableCounts[Number(booking.hall_id)]||0);
-        const tableCount=configuredHallTableCount||Number(selected.table_count||selected.tables_count||booking.table_count||booking.tables_count||booking.number_of_tables||0);
+        const tableCount=configuredHallTableCount||Number(selected.table_count||selected.tables_count||selected.number_of_tables||booking.table_count||booking.tables_count||booking.number_of_tables||0);
         const packageItemQuantity=Number(rel.quantity||0);
         // Water bottles are per table; all other drinks are per total booked guest,
         // including guests covered by a free-meal promotion. Food follows the selected buffet quantity.

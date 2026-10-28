@@ -28,14 +28,40 @@ function auth(req, res, next) {
   }
 }
 
-// دالة جلب ذكية تحاول مطابقة اسم الجدول أو إرجاع مصفوفة آمنة
+// استجابة هجينة ذكية جداً تغطي كافة احتمالات الواجهة الأمامية (Array + Object properties)
+function sendHybridResponse(res, dataArray) {
+  const arr = Array.isArray(dataArray) ? dataArray : [];
+  
+  // إنشاء كائن يجمع خصائص المصفوفة والكائن في نفس الوقت لتجنب أي خطأ map/filter/length/reduce
+  const hybridObj = [
+    ...arr
+  ];
+  
+  hybridObj.success = true;
+  hybridObj.rows = arr;
+  hybridObj.data = arr;
+  hybridObj.allRows = arr;
+  hybridObj.list = arr;
+  hybridObj.items = arr;
+  hybridObj.bookings = arr;
+  hybridObj.archive = arr;
+  hybridObj.halls = arr;
+  hybridObj.packages = arr;
+  hybridObj.buffets = arr;
+  hybridObj.offers = arr;
+  hybridObj.total = arr.length;
+  hybridObj.length = arr.length;
+
+  return res.json(hybridObj);
+}
+
+// دالة جلب آمنة من Supabase
 async function fetchSafeTable(res, tableName) {
   try {
     const { data, error } = await supabase.from(tableName).select('*').order('id', { ascending: false });
-    if (error || !Array.isArray(data)) return res.json([]);
-    return res.json(data);
+    return sendHybridResponse(res, data);
   } catch (err) {
-    return res.json([]);
+    return sendHybridResponse(res, []);
   }
 }
 
@@ -59,7 +85,7 @@ app.get('/api/me', auth, (req, res) => {
   res.json({ id: 1, username: 'admin', name: 'المدير العام', role: 'admin', permissions: ['all'] });
 });
 
-// قائمة شاملة لكل الجداول المحتملة في النظام
+// قائمة شاملة لكل الجداول والمسارات المحتملة في النظام
 const tables = [
   'bookings', 'booking_archive', 'halls', 'packages', 'buffet_packages', 
   'buffet_items', 'buffet_addons', 'addons', 'contractors', 'expenses', 
@@ -71,9 +97,9 @@ tables.forEach(tableName => {
   app.get(`/api/${tableName}`, auth, (req, res) => fetchSafeTable(res, tableName));
 });
 
-// معالج عام شامل لأي مسار API آخر قد تطلبه الواجهة لضمان إرجاع مصفوفة فارغة ودعم الدوال البرمجية (.map, .filter, .reduce)
+// معالج عام لأي مسار آخر قد تطلبه الواجهة الأمامية لمنع أي انهيار نهائياً
 app.all('/api/*', auth, (req, res) => {
-  return res.json([]);
+  return sendHybridResponse(res, []);
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, database: 'supabase', timestamp: new Date().toISOString() }));

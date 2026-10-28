@@ -687,6 +687,65 @@ app.get('/api/bookings/:id/files', auth, requireDb, async (req,res,next)=>{try{r
 app.get('/api/bookings/:id/rooms', auth, requireDb, async (req,res,next)=>{try{res.json(await rows('booking_bride_rooms',{booking_id:Number(req.params.id)}))}catch(e){handleDbError(res,e)}});
 app.get('/api/bookings/:id/additional-discount-requests', auth, requireDb, async (req,res)=>{try{res.json(await rows('additional_discount_requests',{booking_id:Number(req.params.id)}))}catch(e){handleDbError(res,e)}});
 app.get('/api/booking-status-history/:id', auth, requireDb, async (req,res)=>{try{res.json(await rows('booking_status_history',{booking_id:Number(req.params.id)}))}catch(e){handleDbError(res,e)}});
+// Inquiry API compatibility: the deployed Supabase schema stores the customer status in inquiries.status,
+// not in a separate customer_status column. Follow-up scheduling is stored in the followups table.
+app.post('/api/inquiries', auth, requireDb, async (req,res)=>{
+  try {
+    const input = req.body || {};
+    const now = new Date().toISOString();
+    const customerStatus = String(input.customer_status || input.status || 'new');
+    const allowed = ['customer_name','phone','source','notes','assigned_to','status','created_by','created_at','updated_at','event_location','event_type','event_date','event_period','guest_count','budget','requested_hall','availability_status','reason_category','bride_name','contractor_name','phone2'];
+    const row = {};
+    for (const key of allowed) if (input[key] !== undefined && input[key] !== '') row[key] = input[key];
+    row.status = customerStatus;
+    row.created_by = req.user.id;
+    row.created_at = now;
+    row.updated_at = now;
+    if (input.reason !== undefined && String(input.reason).trim()) {
+      const reason = String(input.reason).trim();
+      row.notes = [String(row.notes || '').trim(), `سبب/تفاصيل: ${reason}`].filter(Boolean).join('\n');
+    }
+    if (row.guest_count !== undefined) row.guest_count = Number(row.guest_count) || null;
+    if (row.budget !== undefined) row.budget = Number(row.budget) || 0;
+    if (row.assigned_to !== undefined) row.assigned_to = Number(row.assigned_to) || null;
+    const {data,error} = await supabase.from('inquiries').insert(row).select('*').single();
+    if (error) throw error;
+    let followup = null;
+    if (input.scheduled_at && ['thinking','negotiating','no_answer','followup_requested'].includes(customerStatus)) {
+      const f = await supabase.from('followups').insert({inquiry_id:data.id,scheduled_at:new Date(input.scheduled_at).toISOString(),created_by:req.user.id,created_at:now}).select('*').single();
+      if (f.error) throw f.error;
+      followup = f.data;
+    }
+    res.status(201).json({...data,customer_status:data.status,followup});
+  } catch(e) { handleDbError(res,e); }
+});
+app.put('/api/inquiries/:id', auth, requireDb, async (req,res,next)=>{
+  if (!/^\d+$/.test(req.params.id)) return next();
+  try {
+    const input = req.body || {};
+    const allowed = ['customer_name','phone','source','notes','assigned_to','status','updated_at','event_location','event_type','event_date','event_period','guest_count','budget','requested_hall','availability_status','reason_category','bride_name','contractor_name','phone2'];
+    const patch = {};
+    for (const key of allowed) if (input[key] !== undefined) patch[key] = input[key];
+    if (input.customer_status !== undefined) patch.status = String(input.customer_status || 'new');
+    if (input.reason !== undefined && String(input.reason).trim()) patch.notes = [String(patch.notes || '').trim(),`سبب/تفاصيل: ${String(input.reason).trim()}`].filter(Boolean).join('\n');
+    if (input.call_notes !== undefined && String(input.call_notes).trim()) patch.notes = [String(patch.notes || '').trim(),`ملخص المكالمة: ${String(input.call_notes).trim()}`].filter(Boolean).join('\n');
+    patch.updated_at = new Date().toISOString();
+    if (patch.guest_count !== undefined) patch.guest_count = Number(patch.guest_count) || null;
+    if (patch.budget !== undefined) patch.budget = Number(patch.budget) || 0;
+    if (patch.assigned_to !== undefined) patch.assigned_to = Number(patch.assigned_to) || null;
+    const {data,error} = await supabase.from('inquiries').update(patch).eq('id',Number(req.params.id)).select('*').maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({error:'الاستفسار غير موجود'});
+    let followup = null;
+    const customerStatus = String(input.customer_status || data.status || 'new');
+    if (input.scheduled_at && ['thinking','negotiating','no_answer','followup_requested'].includes(customerStatus)) {
+      const f = await supabase.from('followups').insert({inquiry_id:data.id,scheduled_at:new Date(input.scheduled_at).toISOString(),created_by:req.user.id,created_at:new Date().toISOString()}).select('*').single();
+      if (f.error) throw f.error;
+      followup = f.data;
+    }
+    res.json({...data,customer_status:data.status,followup});
+  } catch(e) { handleDbError(res,e); }
+});
 app.get('/api/inquiries/archive', auth, requireDb, async (req,res)=>{try{const all=await getRows('inquiries');res.json(all.filter(x=>['archived','closed','converted'].includes(String(x.status||'').toLowerCase())))}catch(e){handleDbError(res,e)}});
 app.get('/api/settings/hall-package-terms', auth, requireDb, async (req,res)=>{try{const {data,error}=await supabase.from('app_settings').select('*').eq('key','hall_package_terms').maybeSingle();if(error)throw error;res.json({terms:data?.value||''})}catch(e){handleDbError(res,e)}});
 app.put('/api/settings/hall-package-terms', auth, requireDb, requireAdmin, async (req,res)=>{try{const value=String(req.body?.terms||'');const {data,error}=await supabase.from('app_settings').upsert({key:'hall_package_terms',value},{onConflict:'key'}).select('*').single();if(error)throw error;res.json(data)}catch(e){handleDbError(res,e)}});

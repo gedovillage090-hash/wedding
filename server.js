@@ -28,12 +28,12 @@ function auth(req, res, next) {
   }
 }
 
-// دالة جلب تعيد مصفوفة مباشرة لتتوافق تماماً مع الواجهة الأمامية (.filter و .map)
+// دالة جلب ذكية تحاول مطابقة اسم الجدول أو إرجاع مصفوفة آمنة
 async function fetchSafeTable(res, tableName) {
   try {
     const { data, error } = await supabase.from(tableName).select('*').order('id', { ascending: false });
-    const arr = Array.isArray(data) ? data : [];
-    return res.json(arr);
+    if (error || !Array.isArray(data)) return res.json([]);
+    return res.json(data);
   } catch (err) {
     return res.json([]);
   }
@@ -59,18 +59,19 @@ app.get('/api/me', auth, (req, res) => {
   res.json({ id: 1, username: 'admin', name: 'المدير العام', role: 'admin', permissions: ['all'] });
 });
 
-// جدول المسارات الشاملة للنظام
+// قائمة شاملة لكل الجداول المحتملة في النظام
 const tables = [
   'bookings', 'booking_archive', 'halls', 'packages', 'buffet_packages', 
   'buffet_items', 'buffet_addons', 'addons', 'contractors', 'expenses', 
-  'inquiries', 'notifications', 'safe_transactions', 'inventory', 'work_orders', 'offers'
+  'inquiries', 'notifications', 'safe_transactions', 'inventory', 'work_orders', 
+  'offers', 'users', 'customers', 'contractor_report', 'sales_performance', 'accounting'
 ];
 
 tables.forEach(tableName => {
   app.get(`/api/${tableName}`, auth, (req, res) => fetchSafeTable(res, tableName));
 });
 
-// معالج احتياطي لأي مسار آخر قد تطلبه الواجهة
+// معالج عام لأي مسار API آخر تطلبه الواجهة لتجنب انهيار التطبيق نهائياً وإرجاع مصفوفة فارغة
 app.all('/api/*', auth, (req, res) => {
   return res.json([]);
 });

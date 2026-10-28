@@ -644,37 +644,61 @@ app.get('/api/occupancy-calendar', auth, requireDb, async (req,res) => {
 });
 app.get('/api/customer-lookup', auth, requireDb, async (req,res) => {
   try {
-    // This endpoint is used by the new-booking form and must return one customer
-    // object, not the array of bookings returned by the cashier lookup endpoint.
-    const phone = String(req.query.phone || '').replace(/\D/g, '');
+    // Search existing customers first, then fall back to the inquiry register.
+    // New inquiries are stored in `inquiries` and are not necessarily customers yet.
+    const phone = String(req.query.phone || '').replace(/\\D/g, '');
     if (phone.length < 7) return res.json(null);
+    const normalizePhone = value => String(value || '').replace(/\\D/g, '').replace(/^0020/, '0').replace(/^20(?=1[0125])/, '0');
+    const wanted = normalizePhone(phone);
+    const matchesPhone = row => [row.phone, row.phone2].map(normalizePhone).filter(Boolean)
+      .some(value => value === wanted || value.endsWith(wanted) || wanted.endsWith(value));
+
     const customers = await getRows('customers');
-    const normalizePhone = value => String(value || '').replace(/\D/g, '').replace(/^0020/, '0').replace(/^20(?=1[0125])/, '0');
-    const customer = customers.find(c => {
-      const candidates = [c.phone, c.phone2].map(normalizePhone).filter(Boolean);
-      return candidates.some(value => value === normalizePhone(phone) || value.endsWith(normalizePhone(phone)) || normalizePhone(phone).endsWith(value));
-    });
-    if (!customer) return res.json(null);
-    const bookings = await getRows('bookings');
-    const previous = bookings.filter(b => Number(b.customer_id) === Number(customer.id))
+    const customer = customers.find(matchesPhone);
+    if (customer) {
+      const bookings = await getRows('bookings');
+      const previous = bookings.filter(b => Number(b.customer_id) === Number(customer.id))
+        .sort((a,b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))[0];
+      const hall = previous ? await one('halls', previous.hall_id).catch(() => null) : null;
+      return res.json({
+        found_customer: true,
+        found_inquiry: false,
+        customer_id: customer.id,
+        customer_name: customer.full_name || customer.name || customer.customer_name || '',
+        bride_name: customer.bride_name || '',
+        id_number: customer.id_number || '',
+        nationality: customer.nationality || 'egyptian',
+        phone: customer.phone || '',
+        phone2: customer.phone2 || '',
+        contractor_name: customer.contractor_name || '',
+        address: customer.address || '',
+        notes: customer.notes || '',
+        event_date: previous?.event_date || '',
+        guest_count: previous?.guest_count || '',
+        requested_hall: hall?.name || ''
+      });
+    }
+
+    // Inquiry-only records must also be usable to prefill a new booking.
+    const inquiries = await getRows('inquiries');
+    const inquiry = inquiries.filter(matchesPhone)
       .sort((a,b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))[0];
-    const hall = previous ? await one('halls', previous.hall_id).catch(() => null) : null;
+    if (!inquiry) return res.json(null);
     res.json({
-      found_customer: true,
-      found_inquiry: false,
-      customer_id: customer.id,
-      customer_name: customer.full_name || customer.name || customer.customer_name || '',
-      bride_name: customer.bride_name || '',
-      id_number: customer.id_number || '',
-      nationality: customer.nationality || 'egyptian',
-      phone: customer.phone || '',
-      phone2: customer.phone2 || '',
-      contractor_name: customer.contractor_name || '',
-      address: customer.address || '',
-      notes: customer.notes || '',
-      event_date: previous?.event_date || '',
-      guest_count: previous?.guest_count || '',
-      requested_hall: hall?.name || ''
+      found_customer: false,
+      found_inquiry: true,
+      customer_name: inquiry.customer_name || '',
+      bride_name: inquiry.bride_name || '',
+      phone: inquiry.phone || phone,
+      phone2: inquiry.phone2 || '',
+      contractor_name: inquiry.contractor_name || '',
+      notes: inquiry.notes || '',
+      event_date: inquiry.event_date || '',
+      event_type: inquiry.event_type || 'wedding',
+      event_period: inquiry.event_period || '',
+      guest_count: inquiry.guest_count || '',
+      requested_hall: inquiry.requested_hall || '',
+      nationality: 'egyptian'
     });
   } catch(e) { handleDbError(res, e); }
 });

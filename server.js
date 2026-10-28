@@ -95,9 +95,10 @@ function sortRows(query, table) {
 async function getRows(table, opts = {}) {
   if (!dbReady()) throw new Error('Supabase is not configured');
   let q = supabase.from(table).select('*');
-  if (opts.id) q = q.eq('id', opts.id);
+  // buffet_package_items is a junction table: its real key is package_id + item_id,
+  // and it intentionally has no id column. Never filter/order it by id.
+  if (opts.id && table !== 'buffet_package_items') q = q.eq('id', opts.id);
   if (opts.limit) q = q.limit(opts.limit);
-  // buffet_package_items is a junction table with package_id/item_id/quantity and intentionally has no id column.
   if (opts.order !== false && table !== 'buffet_package_items') q = q.order('id', { ascending: false });
   const { data, error } = await q;
   if (error) throw error;
@@ -642,8 +643,40 @@ app.get('/api/occupancy-calendar', auth, requireDb, async (req,res) => {
   } catch(e) { handleDbError(res,e); }
 });
 app.get('/api/customer-lookup', auth, requireDb, async (req,res) => {
-  try { const phone=String(req.query.phone||'').replace(/\D/g,''); if(phone.length<3)return res.json([]); const cs=await rows('customers'); const ids=new Set(cs.filter(c=>String(c.phone||'').replace(/\D/g,'').includes(phone)).map(c=>c.id)); const bs=await rows('bookings'); const out=[]; for(const b of bs.filter(x=>ids.has(x.customer_id))){ const c=cs.find(x=>x.id===b.customer_id)||{}; const h=await one('halls',b.hall_id)||{}; const p=await one('payments',b.id)||{}; out.push({...b,customer_name:c.name||c.full_name||'',phone:c.phone||'',hall_name:h.name||'',paid_amount:Number(p.amount||0)}); } res.json(out); }
-  catch(e){ handleDbError(res,e); }
+  try {
+    // This endpoint is used by the new-booking form and must return one customer
+    // object, not the array of bookings returned by the cashier lookup endpoint.
+    const phone = String(req.query.phone || '').replace(/\D/g, '');
+    if (phone.length < 7) return res.json(null);
+    const customers = await getRows('customers');
+    const normalizePhone = value => String(value || '').replace(/\D/g, '').replace(/^0020/, '0').replace(/^20(?=1[0125])/, '0');
+    const customer = customers.find(c => {
+      const candidates = [c.phone, c.phone2].map(normalizePhone).filter(Boolean);
+      return candidates.some(value => value === normalizePhone(phone) || value.endsWith(normalizePhone(phone)) || normalizePhone(phone).endsWith(value));
+    });
+    if (!customer) return res.json(null);
+    const bookings = await getRows('bookings');
+    const previous = bookings.filter(b => Number(b.customer_id) === Number(customer.id))
+      .sort((a,b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))[0];
+    const hall = previous ? await one('halls', previous.hall_id).catch(() => null) : null;
+    res.json({
+      found_customer: true,
+      found_inquiry: false,
+      customer_id: customer.id,
+      customer_name: customer.full_name || customer.name || customer.customer_name || '',
+      bride_name: customer.bride_name || '',
+      id_number: customer.id_number || '',
+      nationality: customer.nationality || 'egyptian',
+      phone: customer.phone || '',
+      phone2: customer.phone2 || '',
+      contractor_name: customer.contractor_name || '',
+      address: customer.address || '',
+      notes: customer.notes || '',
+      event_date: previous?.event_date || '',
+      guest_count: previous?.guest_count || '',
+      requested_hall: hall?.name || ''
+    });
+  } catch(e) { handleDbError(res, e); }
 });
 app.get('/api/bookings/:id/details', auth, requireDb, async (req,res,next) => {
   if(!/^\d+$/.test(req.params.id)) return next();

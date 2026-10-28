@@ -103,8 +103,22 @@ async function getRows(table, opts = {}) {
   return data || [];
 }
 function handleDbError(res, error) {
-  console.error('Database request failed:', error?.message || error);
-  return res.status(400).json({ error: 'تعذر تنفيذ العملية على قاعدة البيانات. راجع أسماء الأعمدة وصلاحيات الاتصال.' });
+  const message = String(error?.message || error || 'Unknown database error');
+  console.error('Database request failed:', {
+    message,
+    code: error?.code || null,
+    details: error?.details || null,
+    hint: error?.hint || null
+  });
+  // Return a sanitized diagnostic message so schema mismatches can be fixed precisely.
+  // Do not expose credentials or request headers.
+  return res.status(400).json({
+    error: 'تعذر تنفيذ العملية على قاعدة البيانات.',
+    database_error: message,
+    code: error?.code || null,
+    details: error?.details || null,
+    hint: error?.hint || null
+  });
 }
 
 app.get('/api/health', async (req, res) => { let database='not_configured'; if(dbReady()){try{const {error}=await supabase.from('app_settings').select('key').limit(1);database=error?'error':'connected';}catch{database='error';}} res.status(database==='error'?503:200).json({ok:database==='connected',database,databaseConfigured:dbReady(),timestamp:new Date().toISOString()}); });

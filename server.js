@@ -12,7 +12,6 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '20mb' }));
 app.use(cookieParser());
 
-// قراءة مفاتيح الاتصال بـ Supabase من متغيرات البيئة في Vercel
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -29,44 +28,14 @@ function auth(req, res, next) {
   }
 }
 
-// دالة جلب آمنة تدعم كافة صيغ الاستجابة المطلوبة لواجهة التطبيق
+// دالة جلب تعيد مصفوفة مباشرة لتتوافق تماماً مع الواجهة الأمامية (.filter و .map)
 async function fetchSafeTable(res, tableName) {
   try {
     const { data, error } = await supabase.from(tableName).select('*').order('id', { ascending: false });
     const arr = Array.isArray(data) ? data : [];
-    
-    return res.json({
-      success: true,
-      allRows: arr,
-      rows: arr,
-      data: arr,
-      buffets: arr,
-      items: arr,
-      bookings: arr,
-      archive: arr,
-      list: arr,
-      offers: arr,
-      halls: arr,
-      packages: arr,
-      [tableName]: arr
-    });
+    return res.json(arr);
   } catch (err) {
-    const empty = [];
-    return res.json({
-      success: true,
-      allRows: empty,
-      rows: empty,
-      data: empty,
-      buffets: empty,
-      items: empty,
-      bookings: empty,
-      archive: empty,
-      list: empty,
-      offers: empty,
-      halls: empty,
-      packages: empty,
-      [tableName]: empty
-    });
+    return res.json([]);
   }
 }
 
@@ -90,7 +59,7 @@ app.get('/api/me', auth, (req, res) => {
   res.json({ id: 1, username: 'admin', name: 'المدير العام', role: 'admin', permissions: ['all'] });
 });
 
-// جدول المسارات المعروفة
+// جدول المسارات الشاملة للنظام
 const tables = [
   'bookings', 'booking_archive', 'halls', 'packages', 'buffet_packages', 
   'buffet_items', 'buffet_addons', 'addons', 'contractors', 'expenses', 
@@ -99,6 +68,11 @@ const tables = [
 
 tables.forEach(tableName => {
   app.get(`/api/${tableName}`, auth, (req, res) => fetchSafeTable(res, tableName));
+});
+
+// معالج احتياطي لأي مسار آخر قد تطلبه الواجهة
+app.all('/api/*', auth, (req, res) => {
+  return res.json([]);
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, database: 'supabase', timestamp: new Date().toISOString() }));
